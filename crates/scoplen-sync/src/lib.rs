@@ -14,6 +14,7 @@ pub use scoplen_store::sync::{
 };
 
 pub mod http;
+pub mod notify;
 
 /// Sync contract marker.
 pub const COMPONENT: &str = "sync";

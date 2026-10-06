@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added an authenticated-injection `/sync/v1/notify` WebSocket adapter with bounded first-message
+  credentials, fail-closed device authorization, per-device local fan-out, deterministic CBOR event
+  delivery, lag handling, and route-level success and rejection tests. Multi-instance delivery and
+  event publication from the identity and vault services remain open.
 - Added authenticated-injection K-4 `/sync/v1/keys` GET/PUT routes with deterministic CBOR,
   per-device bundle reads, signed-update validation hooks, exact replay responses, conflict and
   storage problem mapping, and route-level tests. The baseline listener still does not mount the

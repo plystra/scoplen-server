@@ -30,6 +30,12 @@ impl Role {
             Self::Gateway => "gateway",
         }
     }
+
+    /// Whether the current implementation of this role uses relational storage.
+    #[must_use]
+    pub const fn requires_store(self) -> bool {
+        matches!(self, Self::Api | Self::Worker | Self::Edge)
+    }
 }
 
 impl FromStr for Role {
@@ -102,5 +108,15 @@ mod tests {
     fn unknown_role_is_actionable() {
         let error = resolve_roles(&["database".to_owned()]).expect_err("role must be rejected");
         assert!(error.to_string().contains("api, worker, ca, edge, or gateway"));
+    }
+
+    #[test]
+    fn only_database_roles_require_storage() {
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            assert!(role.requires_store(), "{role} requires a database");
+        }
+        for role in [Role::Ca, Role::Gateway] {
+            assert!(!role.requires_store(), "{role} is independent of the database");
+        }
     }
 }

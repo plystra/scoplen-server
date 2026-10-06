@@ -3,9 +3,10 @@
 
 use std::{path::Path, sync::Arc, time::Duration};
 
-use axum::{Router, routing::get};
+use axum::{Router, http::StatusCode, routing::get};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
+use scoplen_store::SqliteStore;
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tracing::{error, info, warn};
@@ -16,6 +17,14 @@ use crate::{Config, Role, ServerError, TlsMode};
 #[derive(Debug, Default)]
 pub struct BootstrapResult {
     /// One-time setup link when this invocation created it.
+    pub setup_link: Option<String>,
+}
+
+/// Role-specific startup resources prepared before role tasks begin.
+pub struct PreparedRoles {
+    /// Database pool for roles that need relational storage.
+    pub store: Option<SqliteStore>,
+    /// First-run setup link only for roles that initialize the deployment.
     pub setup_link: Option<String>,
 }
 
@@ -78,15 +87,40 @@ fn hex_bytes(bytes: &[u8]) -> String {
     value
 }
 
-/// Run the requested roles until Ctrl-C.
+/// Prepare only the resources required by the selected roles.
+///
+/// # Errors
+///
+/// Returns an error when role-specific configuration, database migration, or first-run material
+/// initialization fails.
+pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRoles, ServerError> {
+    config.validate_for_roles(roles)?;
+    if !roles.iter().any(|role| role.requires_store()) {
+        return Ok(PreparedRoles { store: None, setup_link: None });
+    }
+    let store = SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?;
+    let bootstrap = bootstrap(config)?;
+    Ok(PreparedRoles { store: Some(store), setup_link: bootstrap.setup_link })
+}
+
+/// Run the requested roles until Ctrl-C using role-specific startup resources.
 ///
 /// # Errors
 ///
 /// Returns an error when signal handling, listener startup, or a role task fails.
-pub async fn run_roles(config: Config, roles: Vec<Role>) -> Result<(), ServerError> {
+pub async fn run_roles(
+    config: Config,
+    roles: Vec<Role>,
+    store: Option<SqliteStore>,
+) -> Result<(), ServerError> {
+    if roles.iter().any(|role| role.requires_store()) && store.is_none() {
+        return Err(ServerError::MissingStore);
+    }
+    let store = store.map(Arc::new);
     let mut tasks = Vec::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
-        tasks.push(tokio::spawn(run_public_listener(config.clone(), roles.clone())));
+        let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
+        tasks.push(tokio::spawn(run_public_listener(config.clone(), roles.clone(), store)));
     }
     if roles.contains(&Role::Worker) {
         tasks.push(tokio::spawn(run_periodic_role("worker")));
@@ -113,10 +147,24 @@ async fn run_periodic_role(name: &'static str) -> Result<(), ServerError> {
     }
 }
 
-fn api_router() -> Router {
+fn api_router(store: Arc<SqliteStore>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/readyz", get(|| async { "ready" }))
+        .route(
+            "/readyz",
+            get(move || {
+                let store = store.clone();
+                async move {
+                    match store.ping().await {
+                        Ok(()) => (StatusCode::OK, "ready"),
+                        Err(error) => {
+                            error!(%error, "readiness database query failed");
+                            (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+                        }
+                    }
+                }
+            }),
+        )
         .route("/metrics", get(|| async {
             format!(
                 "# HELP scoplen_server_info Server build information.\n# TYPE scoplen_server_info gauge\nscoplen_server_info{{version=\"{}\"}} 1\n",
@@ -126,7 +174,11 @@ fn api_router() -> Router {
         .route("/", get(|| async { "Scoplen server" }))
 }
 
-async fn run_public_listener(config: Config, roles: Vec<Role>) -> Result<(), ServerError> {
+async fn run_public_listener(
+    config: Config,
+    roles: Vec<Role>,
+    store: Arc<SqliteStore>,
+) -> Result<(), ServerError> {
     let address = config.listen_address();
     let listener = TcpListener::bind(&address).await?;
     info!(%address, tls_mode = ?config.tls.mode, "public listener started");
@@ -137,7 +189,7 @@ async fn run_public_listener(config: Config, roles: Vec<Role>) -> Result<(), Ser
                     "edge role is configured behind plain HTTP; gateway ALPN requires direct TLS"
                 );
             }
-            axum::serve(listener, api_router())
+            axum::serve(listener, api_router(store))
                 .await
                 .map_err(|error| ServerError::Task(error.to_string()))?;
         }
@@ -146,7 +198,7 @@ async fn run_public_listener(config: Config, roles: Vec<Role>) -> Result<(), Ser
             loop {
                 let (stream, peer) = listener.accept().await?;
                 let acceptor = acceptor.clone();
-                let router = api_router();
+                let router = api_router(store.clone());
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls) => {
@@ -233,6 +285,20 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use scoplen_store::RelationalStore;
+    use tokio::io::AsyncReadExt;
+
+    async fn remove_test_directory(path: &Path) {
+        for attempt in 0..20 {
+            match fs::remove_dir_all(path) {
+                Ok(()) => return,
+                Err(error) if error.raw_os_error() == Some(32) && attempt < 19 => {
+                    sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("remove test directory {}: {error}", path.display()),
+            }
+        }
+    }
 
     #[test]
     fn bootstrap_creates_private_material_once() {
@@ -251,5 +317,84 @@ mod tests {
         let second = bootstrap(&config).expect("second bootstrap is idempotent");
         assert!(second.setup_link.is_none());
         fs::remove_dir_all(data_dir).expect("test material is removable");
+    }
+
+    #[tokio::test]
+    async fn readiness_follows_database_availability() {
+        let data_dir = std::env::temp_dir().join(format!("scoplen-ready-{}", uuid::Uuid::new_v4()));
+        let store =
+            SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("open database");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind isolated HTTP listener");
+        let address = listener.local_addr().expect("read listener address");
+        let server_store = store.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, api_router(Arc::new(server_store)))
+                .await
+                .expect("serve readiness endpoint");
+        });
+        assert!(http_readiness(address).await.starts_with("HTTP/1.1 200 OK"));
+
+        store.pool().close().await;
+        assert!(http_readiness(address).await.starts_with("HTTP/1.1 503 Service Unavailable"));
+        server.abort();
+        let _ = server.await;
+        drop(store);
+        remove_test_directory(&data_dir).await;
+    }
+
+    async fn http_readiness(address: std::net::SocketAddr) -> String {
+        let mut stream =
+            tokio::net::TcpStream::connect(address).await.expect("connect to listener");
+        stream
+            .write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("send HTTP request");
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.expect("read HTTP response");
+        String::from_utf8(response).expect("HTTP response is UTF-8")
+    }
+
+    #[tokio::test]
+    async fn server_refuses_unwritable_database_path() {
+        let data_dir = std::env::temp_dir().join(format!("scoplen-path-{}", uuid::Uuid::new_v4()));
+        fs::write(&data_dir, "occupied").expect("create file where directory is needed");
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        let result = prepare_roles(&config, &[Role::Worker]).await;
+        assert!(matches!(result, Err(ServerError::Storage(_))));
+        fs::remove_file(data_dir).expect("test file is removable");
+    }
+
+    #[tokio::test]
+    async fn standalone_ca_and_gateway_do_not_open_sqlite_or_generate_setup_material() {
+        let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
+        fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.storage.backend = "postgres".into();
+
+        for roles in [vec![Role::Ca], vec![Role::Gateway], vec![Role::Ca, Role::Gateway]] {
+            let prepared = prepare_roles(&config, &roles).await.expect("roles need no database");
+            assert!(prepared.store.is_none());
+            assert!(prepared.setup_link.is_none());
+        }
+        assert_eq!(fs::read(&data_dir).expect("original file remains"), b"occupied");
+        fs::remove_file(data_dir).expect("test file is removable");
+    }
+
+    #[tokio::test]
+    async fn api_worker_and_edge_still_require_sqlite() {
+        let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
+        fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            let result = prepare_roles(&config, &[role]).await;
+            assert!(matches!(result, Err(ServerError::Storage(_))), "{role} must open SQLite");
+        }
+        let result = run_roles(config, vec![Role::Api], None).await;
+        assert!(matches!(result, Err(ServerError::MissingStore)));
+        fs::remove_file(data_dir).expect("test file is removable");
     }
 }

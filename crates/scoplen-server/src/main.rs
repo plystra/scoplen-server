@@ -4,7 +4,7 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, ValueEnum};
-use scoplen_server::{Config, Role, ServerError, VERSION, bootstrap, resolve_roles};
+use scoplen_server::{Config, Role, ServerError, VERSION, prepare_roles, resolve_roles};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -64,12 +64,6 @@ async fn run() -> Result<(), ServerError> {
 
     let cli = Cli::parse();
     let config = Config::load(&cli.config)?;
-    config.validate()?;
-    if cli.validate_config {
-        println!("configuration valid: {}", cli.config.display());
-        return Ok(());
-    }
-
     let role_names = if cli.role.is_empty() {
         config.roles.names.clone()
     } else {
@@ -78,11 +72,17 @@ async fn run() -> Result<(), ServerError> {
     let roles = resolve_roles(&role_names).map_err(|error| {
         ServerError::Config(scoplen_server::ConfigError::Invalid(error.to_string()))
     })?;
-    let bootstrap = bootstrap(&config)?;
-    if let Some(link) = bootstrap.setup_link {
+    config.validate_for_roles(&roles)?;
+    if cli.validate_config {
+        println!("configuration valid: {}", cli.config.display());
+        return Ok(());
+    }
+
+    let prepared = prepare_roles(&config, &roles).await?;
+    if let Some(link) = prepared.setup_link {
         println!("first-run setup link (valid for one hour): {link}");
     }
-    scoplen_server::run_roles(config, roles).await
+    scoplen_server::run_roles(config, roles, prepared.store).await
 }
 
 // Keep the public role names visible to rustdoc and downstream CLI tooling.

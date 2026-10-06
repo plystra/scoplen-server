@@ -96,7 +96,7 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns an error when a listener, role, storage, TLS, or ACME value violates a local
+    /// Returns an error when a listener, role, TLS, or ACME value violates a local
     /// deployment invariant.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.server.listen_port == 0 {
@@ -136,6 +136,21 @@ impl Config {
                 }
             }
             TlsMode::Plain => {}
+        }
+        Ok(())
+    }
+
+    /// Validate settings required by the selected roles, including the database backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any selected role cannot run with the configured storage backend.
+    pub fn validate_for_roles(&self, roles: &[crate::Role]) -> Result<(), ConfigError> {
+        self.validate()?;
+        if roles.iter().any(|role| role.requires_store()) && self.storage.backend != "sqlite" {
+            return Err(ConfigError::Invalid(
+                "storage.backend must be sqlite for api, worker, or edge; PostgreSQL support is not available yet".into(),
+            ));
         }
         Ok(())
     }
@@ -248,7 +263,7 @@ impl Default for RoleSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct StorageSettings {
-    /// `sqlite` is the Personal and Team default; PostgreSQL is selected explicitly.
+    /// `sqlite` is the Personal and Team default; PostgreSQL is reserved for V2.
     pub backend: String,
 }
 
@@ -300,5 +315,20 @@ mod tests {
         config.tls.mode = TlsMode::Files;
         let error = config.validate().expect_err("missing files must be rejected");
         assert!(error.to_string().contains("cert_file and tls.key_file"));
+    }
+
+    #[test]
+    fn unsupported_storage_backends_are_rejected() {
+        let mut config = Config::default();
+        config.storage.backend = "postgres".into();
+        let error = config
+            .validate_for_roles(&[crate::Role::Api])
+            .expect_err("PostgreSQL is not implemented for the API");
+        assert!(error.to_string().contains("storage.backend"));
+        config.storage.backend = "unknown".into();
+        assert!(config.validate_for_roles(&[crate::Role::Worker]).is_err());
+        config
+            .validate_for_roles(&[crate::Role::Ca, crate::Role::Gateway])
+            .expect("database-free roles ignore storage backend");
     }
 }

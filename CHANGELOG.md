@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added authenticated-injection K-4 `/sync/v1/keys` GET/PUT routes with deterministic CBOR,
+  per-device bundle reads, signed-update validation hooks, exact replay responses, conflict and
+  storage problem mapping, and route-level tests. The baseline listener still does not mount the
+  router.
 - Added an opaque SQLite account key-bundle store for D-50 with per-device wrapped-ARK reads,
   bounded artifacts and device wraps, atomic revision compare-and-swap updates, and exact replay
   handling. Authentication, membership, and account-signature verification remain service-layer

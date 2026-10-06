@@ -20,11 +20,15 @@ The relational storage boundary currently supports SQLite only for `api`, `worke
 Those roles open `server.data_dir/scoplen.sqlite`, enable WAL and foreign keys on pooled
 connections, and apply embedded forward migrations before generating first-run material. The
 migrations establish the organization table plus the sync storage foundation: vault counters,
-current opaque object envelopes, retained version rows, and per-device acknowledgement cursors.
+current opaque object envelopes, retained version rows, per-device acknowledgement cursors, and
+the account key-bundle tables. Account key artifacts remain opaque at this boundary; the store
+scopes wrapped-ARK reads to the authenticated device and applies atomic revision replay rules.
 `scoplen-store` allocates a contiguous sequence range inside a write transaction, checks every
 compare-and-swap base before changing state, and exposes current change and full-reconciliation
 snapshot pages without interpreting envelope bytes. A migration error prevents those roles from
 starting. `/readyz` queries the database and returns 503 when the query fails. Public HTTP/auth
-endpoints, envelope validation, policy filtering, version retention and tombstone purge workers,
-PostgreSQL, parallel migration equivalence, application-level column encryption, object storage,
-audit, and other worker jobs remain roadmap work.
+endpoints are still unmounted by the baseline listener; the injected sync router now covers the
+account-key and object-sync boundaries but still delegates authentication, signature verification,
+membership, and policy decisions to the service. Policy filtering, version retention and tombstone
+purge workers, PostgreSQL, parallel migration equivalence, application-level column encryption,
+object storage, audit, and other worker jobs remain roadmap work.

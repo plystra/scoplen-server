@@ -20,7 +20,7 @@ use axum::{
 };
 use scoplen_api::{ErrorCode, ProblemDetails, sync as api};
 use scoplen_model::cbor::{self, Value};
-use scoplen_store::{SqliteStore, sync as storage};
+use scoplen_store::{SqliteStore, account_keys as key_storage, sync as storage};
 use uuid::{Uuid, Variant};
 
 /// The maximum request body accepted by the write endpoint. The CBOR codec applies the same
@@ -40,6 +40,15 @@ pub enum SyncOperation {
     Write,
     /// Advance a device acknowledgement cursor.
     Acknowledge,
+}
+
+/// Account-key operation requested from the authenticator.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SyncKeysOperation {
+    /// Read the bundle visible to the authenticated device.
+    Read,
+    /// Publish a rotated account-key bundle.
+    Write,
 }
 
 /// An authenticated device identity supplied by the identity service.
@@ -137,6 +146,49 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         vault: storage::VaultId,
         writes: &[api::SyncWrite],
     ) -> Result<(), AuthFailure>;
+
+    /// Resolve the account that owns an authenticated device.
+    ///
+    /// This is kept separate from [`AuthenticatedDevice`] because vault synchronization only
+    /// needs a device identifier. Account-key routes must use this method before touching key
+    /// storage, and implementations must not derive the account from caller-controlled input.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication failure when the device is not associated with an account.
+    fn account_id(
+        &self,
+        identity: AuthenticatedDevice,
+    ) -> Result<key_storage::AccountId, AuthFailure>;
+
+    /// Authorize an account-key operation after `DPoP` authentication.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication or policy failure when the device cannot access account keys.
+    fn authorize_keys(
+        &self,
+        identity: AuthenticatedDevice,
+        account_id: key_storage::AccountId,
+        operation: SyncKeysOperation,
+    ) -> Result<(), AuthFailure>;
+
+    /// Validate the account-key update before storage.
+    ///
+    /// Implementations MUST verify the signature over `update.signature_input()` with the
+    /// current account signing key and require exactly one wrap for every enrolled, unrevoked
+    /// device. The storage layer only enforces opaque bounds and revision replay semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication or request failure when the signature or active-device set is
+    /// invalid.
+    fn validate_key_bundle_update(
+        &self,
+        identity: AuthenticatedDevice,
+        account_id: key_storage::AccountId,
+        update: &api::SyncAccountKeyBundleUpdate,
+    ) -> Result<(), AuthFailure>;
 }
 
 /// Build the K-4 router with an explicit authentication implementation.
@@ -146,6 +198,7 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
 pub fn router<A: SyncAuthenticator>(store: Arc<SqliteStore>, authenticator: A) -> Router {
     let state = SyncHttpState { store, authenticator };
     Router::new()
+        .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -159,6 +212,95 @@ pub fn router<A: SyncAuthenticator>(store: Arc<SqliteStore>, authenticator: A) -
 struct SyncHttpState<A> {
     store: Arc<SqliteStore>,
     authenticator: A,
+}
+
+async fn keys_get<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    let identity = state
+        .authenticator
+        .authenticate(&method, &uri, &headers)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let account_id = state
+        .authenticator
+        .account_id(identity)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    state
+        .authenticator
+        .authorize_keys(identity, account_id, SyncKeysOperation::Read)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let bundle = state
+        .store
+        .get_account_key_bundle(account_id, identity.device_id)
+        .await
+        .map_err(|error| SyncHttpError::from_account_key_store(&error, &instance))?;
+    let response = api::SyncAccountKeyBundle {
+        revision: bundle.revision,
+        wrapped_ark: bundle.wrapped_ark,
+        account_signing_key: bundle.account_signing_key,
+        account_kem_key: bundle.account_kem_key,
+        recovery_blob: bundle.recovery_blob,
+        certificates: bundle.certificates,
+        revocations: bundle.revocations,
+    };
+    Ok(cbor_response(response.to_cbor().map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("could not encode account key bundle: {error}"))
+    })?))
+}
+
+async fn keys_put<A: SyncAuthenticator>(
+    State(state): State<SyncHttpState<A>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> SyncResult<Response> {
+    let instance = request_id(&headers);
+    require_cbor(&headers, &instance)?;
+    let identity = state
+        .authenticator
+        .authenticate(&method, &uri, &headers)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let account_id = state
+        .authenticator
+        .account_id(identity)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    state
+        .authenticator
+        .authorize_keys(identity, account_id, SyncKeysOperation::Write)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    if body.len() > key_storage::MAX_KEY_BUNDLE_BYTES {
+        return Err(SyncHttpError::too_large(&instance, "account key bundle exceeds 4 MiB"));
+    }
+    let update = api::SyncAccountKeyBundleUpdate::from_cbor(&body).map_err(|error| {
+        SyncHttpError::invalid(&instance, format!("invalid account key bundle: {error}"))
+    })?;
+    state
+        .authenticator
+        .validate_key_bundle_update(identity, account_id, &update)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
+    let update = account_key_update_to_storage(update, &instance)?;
+    let result = state
+        .store
+        .put_account_key_bundle(account_id, &update)
+        .await
+        .map_err(|error| SyncHttpError::from_account_key_store(&error, &instance))?;
+    let revision = match result {
+        key_storage::AccountKeyBundlePut::Applied { revision }
+        | key_storage::AccountKeyBundlePut::Replay { revision } => revision,
+    };
+    Ok(cbor_response(api::SyncAccountKeyBundlePutResponse { revision }.to_cbor().map_err(
+        |error| {
+            SyncHttpError::invalid(
+                &instance,
+                format!("could not encode account key update response: {error}"),
+            )
+        },
+    )?))
 }
 
 async fn changes<A: SyncAuthenticator>(
@@ -424,6 +566,31 @@ fn change_to_api(change: storage::SyncChange) -> api::SyncChange {
     }
 }
 
+fn account_key_update_to_storage(
+    update: api::SyncAccountKeyBundleUpdate,
+    instance: &str,
+) -> SyncResult<key_storage::AccountKeyBundleUpdate> {
+    let signature: [u8; api::SYNC_KEY_SIGNATURE_BYTES] =
+        update.signature.try_into().map_err(|_| {
+            SyncHttpError::invalid(instance, "account key signature must be exactly 64 bytes")
+        })?;
+    Ok(key_storage::AccountKeyBundleUpdate {
+        revision: update.revision,
+        device_wraps: update
+            .device_wraps
+            .into_iter()
+            .map(|wrap| key_storage::DeviceWrap {
+                device_id: wrap.device_id.into_bytes(),
+                wrapped_ark: wrap.wrapped_ark,
+            })
+            .collect(),
+        account_signing_key: update.account_signing_key,
+        account_kem_key: update.account_kem_key,
+        recovery_blob: update.recovery_blob,
+        signature,
+    })
+}
+
 fn request_id(headers: &HeaderMap) -> String {
     headers
         .get("x-request-id")
@@ -534,12 +701,74 @@ impl SyncHttpError {
         }
     }
 
+    fn from_account_key_store(
+        error: &key_storage::AccountKeyStoreError,
+        instance: &str,
+    ) -> Box<Self> {
+        match error {
+            key_storage::AccountKeyStoreError::BundleNotFound => Self::known(
+                instance,
+                StatusCode::NOT_FOUND,
+                "sync.object_not_found",
+                "Account key bundle not found",
+                "The account key bundle is unavailable for this device; no data changed and retrying will not help.",
+                false,
+                false,
+            ),
+            key_storage::AccountKeyStoreError::Conflict { current_revision } => Self::known(
+                instance,
+                StatusCode::CONFLICT,
+                "sync.conflict",
+                "Account key bundle conflict",
+                format!(
+                    "The account key revision conflicts with the current revision {current_revision}; no data changed and fetch the current bundle before retrying."
+                ),
+                false,
+                true,
+            ),
+            key_storage::AccountKeyStoreError::ArtifactTooLarge(_)
+            | key_storage::AccountKeyStoreError::DeviceWrapLimit => {
+                Self::too_large(instance, "account key bundle exceeds the configured limits")
+            }
+            key_storage::AccountKeyStoreError::InvalidRevision
+            | key_storage::AccountKeyStoreError::EmptyArtifact(_)
+            | key_storage::AccountKeyStoreError::InvalidDeviceWraps
+            | key_storage::AccountKeyStoreError::InvalidSignature => {
+                Self::invalid(instance, "account key bundle fields are invalid")
+            }
+            key_storage::AccountKeyStoreError::RevisionExhausted
+            | key_storage::AccountKeyStoreError::Constraint(_)
+            | key_storage::AccountKeyStoreError::CorruptRow(_)
+            | key_storage::AccountKeyStoreError::Database(_) => Self::known(
+                instance,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sync.storage_unavailable",
+                "Sync service unavailable",
+                "The server could not complete the account key request; no data changed and retrying may help.",
+                false,
+                true,
+            ),
+        }
+    }
+
     fn invalid(instance: &str, detail: impl Into<String>) -> Box<Self> {
         Self::known(
             instance,
             StatusCode::BAD_REQUEST,
             "sync.invalid_request",
             "Invalid sync request",
+            detail,
+            false,
+            false,
+        )
+    }
+
+    fn too_large(instance: &str, detail: impl Into<String>) -> Box<Self> {
+        Self::known(
+            instance,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "sync.invalid_request",
+            "Sync request is too large",
             detail,
             false,
             false,
@@ -718,6 +947,53 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn account_id(
+            &self,
+            _identity: AuthenticatedDevice,
+        ) -> Result<key_storage::AccountId, AuthFailure> {
+            Ok([42; 16])
+        }
+
+        fn authorize_keys(
+            &self,
+            _identity: AuthenticatedDevice,
+            _account_id: key_storage::AccountId,
+            _operation: SyncKeysOperation,
+        ) -> Result<(), AuthFailure> {
+            if self.allowed {
+                Ok(())
+            } else {
+                Err(AuthFailure::new(
+                    StatusCode::FORBIDDEN,
+                    "policy.denied",
+                    "Account key access denied",
+                    "The device is not authorized for account keys; no data changed and retrying will not help.",
+                    false,
+                )
+                .expect("test policy failure"))
+            }
+        }
+
+        fn validate_key_bundle_update(
+            &self,
+            _identity: AuthenticatedDevice,
+            _account_id: key_storage::AccountId,
+            _update: &api::SyncAccountKeyBundleUpdate,
+        ) -> Result<(), AuthFailure> {
+            if self.reject_writes {
+                Err(AuthFailure::new(
+                    StatusCode::BAD_REQUEST,
+                    "sync.invalid_request",
+                    "Invalid account key bundle",
+                    "The injected account key validator rejected this update; no data changed and retrying will not help.",
+                    false,
+                )
+                .expect("test key validation failure"))
+            } else {
+                Ok(())
+            }
+        }
     }
 
     async fn test_store() -> (Arc<SqliteStore>, storage::VaultId, storage::DeviceId) {
@@ -735,6 +1011,134 @@ mod tests {
 
     fn request_headers(builder: axum::http::request::Builder) -> axum::http::request::Builder {
         builder.header(AUTHORIZATION, "DPoP test-token").header("dpop", "test-proof")
+    }
+
+    fn key_update(device_ids: [storage::DeviceId; 2]) -> api::SyncAccountKeyBundleUpdate {
+        api::SyncAccountKeyBundleUpdate {
+            revision: 1,
+            device_wraps: vec![
+                api::SyncAccountDeviceWrap {
+                    device_id: Uuid::from_bytes(device_ids[0]),
+                    wrapped_ark: vec![1, 2],
+                },
+                api::SyncAccountDeviceWrap {
+                    device_id: Uuid::from_bytes(device_ids[1]),
+                    wrapped_ark: vec![3, 4],
+                },
+            ],
+            account_signing_key: vec![5, 6],
+            account_kem_key: vec![7, 8],
+            recovery_blob: vec![9, 10],
+            signature: vec![0x11; api::SYNC_KEY_SIGNATURE_BYTES],
+        }
+    }
+
+    #[tokio::test]
+    async fn account_key_get_put_replay_and_conflict_round_trip_through_cbor() {
+        let (store, _vault, _) = test_store().await;
+        let mut ids = [Uuid::now_v7(), Uuid::now_v7()];
+        ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        let device_ids = [ids[0].into_bytes(), ids[1].into_bytes()];
+        let device = device_ids[0];
+        let authenticator = TestAuthenticator::new(device, true);
+        let app = router(store.clone(), authenticator);
+        store
+            .replace_account_key_statements([42; 16], &[vec![3], vec![1], vec![3]], &[vec![2]])
+            .await
+            .expect("statements");
+        let update = key_update(device_ids);
+        let body = update.to_cbor().expect("key update");
+        let request = request_headers(
+            Request::builder()
+                .method("PUT")
+                .uri("/sync/v1/keys")
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(body.clone()))
+        .expect("put request");
+        let response = app.clone().oneshot(request).await.expect("put response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("put body");
+        assert_eq!(
+            api::SyncAccountKeyBundlePutResponse::from_cbor(&response_body)
+                .expect("put response cbor")
+                .revision,
+            1
+        );
+
+        let request = request_headers(Request::builder().uri("/sync/v1/keys"))
+            .body(Body::empty())
+            .expect("get request");
+        let response = app.clone().oneshot(request).await.expect("get response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("get body");
+        let bundle = api::SyncAccountKeyBundle::from_cbor(&response_body).expect("get cbor");
+        assert_eq!(bundle.revision, 1);
+        assert_eq!(bundle.wrapped_ark, vec![1, 2]);
+        assert_eq!(bundle.certificates, vec![vec![1], vec![3]]);
+        assert_eq!(bundle.revocations, vec![vec![2]]);
+
+        let request = request_headers(
+            Request::builder()
+                .method("PUT")
+                .uri("/sync/v1/keys")
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(body))
+        .expect("replay request");
+        let response = app.clone().oneshot(request).await.expect("replay response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut changed = update;
+        changed.account_kem_key = vec![99];
+        let request = request_headers(
+            Request::builder()
+                .method("PUT")
+                .uri("/sync/v1/keys")
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(changed.to_cbor().expect("changed update")))
+        .expect("conflict request");
+        let response = app.oneshot(request).await.expect("conflict response");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response_body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("conflict body");
+        let problem = ProblemDetails::from_cbor(&response_body).expect("conflict problem");
+        assert_eq!(problem.code.as_str(), "sync.conflict");
+    }
+
+    #[tokio::test]
+    async fn account_key_errors_preserve_auth_and_not_found_boundaries() {
+        let (store, _vault, _) = test_store().await;
+        let device = Uuid::now_v7().into_bytes();
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
+        let request = Request::builder()
+            .uri("/sync/v1/keys")
+            .body(Body::empty())
+            .expect("unauthenticated request");
+        let response = app.clone().oneshot(request).await.expect("auth response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("auth body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&body).expect("auth problem").code.as_str(),
+            "auth.authentication_required"
+        );
+
+        let unknown = Uuid::now_v7().into_bytes();
+        let app = router(store, TestAuthenticator::new(unknown, true));
+        let request = request_headers(Request::builder().uri("/sync/v1/keys"))
+            .body(Body::empty())
+            .expect("missing bundle request");
+        let response = app.oneshot(request).await.expect("missing bundle response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body =
+            to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("missing bundle body");
+        assert_eq!(
+            ProblemDetails::from_cbor(&body).expect("missing bundle problem").code.as_str(),
+            "sync.object_not_found"
+        );
     }
 
     #[tokio::test]

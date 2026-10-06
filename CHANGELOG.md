@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added an opaque SQLite account key-bundle store for D-50 with per-device wrapped-ARK reads,
+  bounded artifacts and device wraps, atomic revision compare-and-swap updates, and exact replay
+  handling. Authentication, membership, and account-signature verification remain service-layer
+  responsibilities.
 - Added the K-4 HTTP/CBOR adapter for changes, snapshots, retained versions, object writes, and
   acknowledgements. The adapter requires an injected DPoP-bound authenticator and a write-envelope
   validator, maps storage failures to problem-details codes, and remains unmounted by the baseline

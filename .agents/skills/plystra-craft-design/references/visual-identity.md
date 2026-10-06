@@ -186,4 +186,3 @@ Before shipping a public visual surface, ask:
 5. Would the design still serve its purpose if trends changed next year?
 
 Revise elements whose novelty comes at the expense of clarity, honesty, accessibility, or the work's purpose.
-\n

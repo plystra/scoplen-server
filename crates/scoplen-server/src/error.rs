@@ -37,4 +37,3 @@ pub enum ServerError {
     #[error("role task failed: {0}")]
     Task(String),
 }
-\n

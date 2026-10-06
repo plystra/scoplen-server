@@ -355,4 +355,3 @@ Before merging a visible UI change, review it with the [UI review checklist](../
 ## 21. Public websites
 
 Official project websites and public documentation also follow [Websites, Search, and Sharing](https://github.com/plystra/craft/blob/main/principles/13-websites-search-and-sharing.md).
-\n

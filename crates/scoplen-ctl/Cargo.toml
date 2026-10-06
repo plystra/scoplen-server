@@ -8,5 +8,3 @@ description = "Scoplen administration CLI library."
 
 [lints]
 workspace = true
-
-\n

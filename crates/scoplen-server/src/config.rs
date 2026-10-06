@@ -302,4 +302,3 @@ mod tests {
         assert!(error.to_string().contains("cert_file and tls.key_file"));
     }
 }
-\n

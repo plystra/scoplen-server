@@ -24,4 +24,3 @@ self-hosted server, host agent, administration CLI, and web console.
 ## Review
 
 Review this record with the project record before a new public surface or a maturity change.
-\n

@@ -8,5 +8,3 @@ description = "Scoplen identity and device lifecycle primitives."
 
 [lints]
 workspace = true
-
-\n

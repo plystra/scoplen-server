@@ -5,4 +5,3 @@
 
 /// Sync contract marker.
 pub const COMPONENT: &str = "sync";
-\n

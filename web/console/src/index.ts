@@ -2,4 +2,3 @@
 
 /** The web console package boundary before the public console is implemented. */
 export const component = "server-console" as const;
-\n

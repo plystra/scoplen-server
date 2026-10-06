@@ -8,5 +8,3 @@ description = "Scoplen managed access gateway service."
 
 [lints]
 workspace = true
-
-\n

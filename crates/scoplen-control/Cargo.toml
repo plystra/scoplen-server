@@ -8,5 +8,3 @@ description = "Scoplen organization and authorization service."
 
 [lints]
 workspace = true
-
-\n

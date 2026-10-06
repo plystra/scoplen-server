@@ -5,4 +5,3 @@
 
 /// Administration CLI contract marker.
 pub const COMPONENT: &str = "ctl";
-\n

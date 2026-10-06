@@ -45,4 +45,3 @@ certificate and key. `tls.mode = "acme"` is reserved until the ACME implementati
 See [SECURITY.md](SECURITY.md). Generated deployment keys, CA keys, and setup links are private
 deployment material; keep the data directory out of source control and backups that are not
 protected by the operator.
-\n

@@ -5,4 +5,3 @@
 
 /// Storage contract marker.
 pub const COMPONENT: &str = "store";
-\n

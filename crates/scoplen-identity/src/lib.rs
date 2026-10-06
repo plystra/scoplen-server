@@ -5,4 +5,3 @@
 
 /// Identity contract marker.
 pub const COMPONENT: &str = "identity";
-\n

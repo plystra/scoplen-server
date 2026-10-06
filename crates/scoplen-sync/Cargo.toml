@@ -8,5 +8,3 @@ description = "Scoplen encrypted synchronization service."
 
 [lints]
 workspace = true
-
-\n

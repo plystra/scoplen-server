@@ -26,4 +26,3 @@ Work without a digital interface does not need one; apply the identity and acces
 Inspect the rendered result at supported desktop and mobile sizes, with keyboard and reduced motion where relevant. Use the [UI review checklist](assets/templates/ui-review-checklist.md) for visible interface changes. Report the checks performed and any states left unverified.
 
 The [index](references/index.md) and [source ledger](references/sources.json) identify the canonical sources of this snapshot. Keep the [license](references/LICENSE) when reusing them.
-\n

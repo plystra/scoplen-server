@@ -19,4 +19,3 @@ pnpm --dir web/console typecheck
 
 Every commit must include a `Signed-off-by:` trailer. Do not publish images, packages, or
 references from an agent checkout.
-\n

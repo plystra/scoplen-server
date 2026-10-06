@@ -78,4 +78,3 @@ Use this checklist before merging visible UI changes in a Plystra project. Apply
 ## Final question
 
 - [ ] Does the change serve the intended experience while preserving clarity, usability, accessibility, and trust?
-\n

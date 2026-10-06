@@ -131,4 +131,3 @@ Recommended practices:
 - document the current language policy.
 
 A project may intentionally support only one language during early phases, but that decision should be explicit.
-\n

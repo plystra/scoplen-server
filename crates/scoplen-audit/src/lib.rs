@@ -5,4 +5,3 @@
 
 /// Audit contract marker.
 pub const COMPONENT: &str = "audit";
-\n

@@ -5,4 +5,3 @@
 
 /// Gateway contract marker.
 pub const COMPONENT: &str = "gateway";
-\n

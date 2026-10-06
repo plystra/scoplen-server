@@ -104,4 +104,3 @@ mod tests {
         assert!(error.to_string().contains("api, worker, ca, edge, or gateway"));
     }
 }
-\n

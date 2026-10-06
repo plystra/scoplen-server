@@ -253,4 +253,3 @@ mod tests {
         fs::remove_dir_all(data_dir).expect("test material is removable");
     }
 }
-\n

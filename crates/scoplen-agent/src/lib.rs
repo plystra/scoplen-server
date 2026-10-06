@@ -5,4 +5,3 @@
 
 /// Host-agent contract marker.
 pub const COMPONENT: &str = "agent";
-\n

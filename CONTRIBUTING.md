@@ -12,4 +12,3 @@ Signed-off-by: Your Name <you@example.com>
 ```
 
 Do not commit generated secrets, local data, `.env` files, or deployment credentials.
-\n

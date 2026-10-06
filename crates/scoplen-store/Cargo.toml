@@ -8,5 +8,3 @@ description = "Scoplen storage abstraction."
 
 [lints]
 workspace = true
-
-\n

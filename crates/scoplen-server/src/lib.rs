@@ -15,4 +15,3 @@ pub use runtime::{BootstrapResult, bootstrap, run_roles};
 
 /// The server's current package version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-\n

@@ -14,4 +14,3 @@ at startup until TLS-ALPN-01 is implemented.
 The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracing events; secret
 material is written only under the configured data directory and is never included in request
 responses or logs.
-\n

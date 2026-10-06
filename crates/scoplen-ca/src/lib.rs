@@ -5,4 +5,3 @@
 
 /// Certificate authority contract marker.
 pub const COMPONENT: &str = "ca";
-\n

@@ -5,4 +5,3 @@
 
 /// Control-plane contract marker.
 pub const COMPONENT: &str = "control";
-\n

@@ -88,4 +88,3 @@ async fn run() -> Result<(), ServerError> {
 // Keep the public role names visible to rustdoc and downstream CLI tooling.
 #[allow(dead_code)]
 fn _role_type_is_public(_: Role) {}
-\n

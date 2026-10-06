@@ -1,0 +1,19 @@
+# Copy to spl-server.toml and adjust for the deployment.
+
+[server]
+listen_addr = "127.0.0.1"
+listen_port = 8443
+public_host = "localhost"
+data_dir = "./data"
+
+[tls]
+# Use "plain" behind a trusted TLS reverse proxy, or "files" for direct TLS.
+mode = "plain"
+trusted_proxies = []
+
+[roles]
+names = ["all"]
+
+[storage]
+backend = "sqlite"
+\n

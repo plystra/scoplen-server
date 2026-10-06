@@ -1,0 +1,12 @@
+[package]
+name = "scoplen-ca"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Scoplen certificate authority service."
+
+[lints]
+workspace = true
+
+\n

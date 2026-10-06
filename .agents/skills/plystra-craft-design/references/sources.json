@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "generator": "tooling/build-skills.ts",
+  "skill": "plystra-craft-design",
+  "craftVersion": "1.0.1",
+  "canonicalBaseUrl": "https://github.com/plystra/craft/blob/main/",
+  "sources": [
+    {
+      "path": "principles/04-visual-identity.md",
+      "sha256": "f28940f1816781fabfc2e1e82156ce5d3c3df810e3805553b539f4d0a904e4fa",
+      "selection": null,
+      "output": "references/visual-identity.md"
+    },
+    {
+      "path": "principles/05-frontend-ui-design.md",
+      "sha256": "e9f2b54549bd328af3a9f69c2b6f52cca150e085d6ee7f4def4e19de4360d15e",
+      "selection": null,
+      "output": "references/interface-design.md"
+    },
+    {
+      "path": "principles/06-accessibility-and-interaction.md",
+      "sha256": "157cc460dea92eec5f7c4e34ad1c8c878fdaaa1b41812a0ba48be2d8f762be3a",
+      "selection": null,
+      "output": "references/accessibility.md"
+    },
+    {
+      "path": "templates/ui-review-checklist.md",
+      "sha256": "7f065fd95cdfb0a53e5e7a70b5cc0c0f2eeaf141c838ee313da6e1213fa7d90b",
+      "selection": null,
+      "output": "assets/templates/ui-review-checklist.md"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "9e5f1b3c610b9c2da5c313bf81d577a7d1acec686bdb0384edefa6df0f90cd94",
+      "selection": null,
+      "output": "references/LICENSE"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "assets/templates/ui-review-checklist.md",
+      "sha256": "1b153e151730e7f5483c4d04aeb610bcbba99ea792ed72274ef1a432bfc0ab21"
+    },
+    {
+      "path": "references/accessibility.md",
+      "sha256": "7d283596b904211305941c87f8e543d724574d04572f6efd3304b866aef862f9"
+    },
+    {
+      "path": "references/index.md",
+      "sha256": "435a9cc4930a8d0b5c15e0e71e48f041a43d310aa505aa1cae6f9d275cda228f"
+    },
+    {
+      "path": "references/interface-design.md",
+      "sha256": "76e07bdb0b1e9ee5912cbc93baa3f9a8bbc93afa7700c2b813787804b08fdd81"
+    },
+    {
+      "path": "references/LICENSE",
+      "sha256": "9e5f1b3c610b9c2da5c313bf81d577a7d1acec686bdb0384edefa6df0f90cd94"
+    },
+    {
+      "path": "references/visual-identity.md",
+      "sha256": "da7db60b01adabe085aeabd802f66482eb6d04d6d646f9f191583ce7d5422dc3"
+    }
+  ]
+}
+\n

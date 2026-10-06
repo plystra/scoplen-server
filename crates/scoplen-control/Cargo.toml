@@ -1,0 +1,12 @@
+[package]
+name = "scoplen-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Scoplen organization and authorization service."
+
+[lints]
+workspace = true
+
+\n

@@ -1,0 +1,12 @@
+[package]
+name = "scoplen-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Scoplen audit log and integrity primitives."
+
+[lints]
+workspace = true
+
+\n

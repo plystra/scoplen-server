@@ -1,0 +1,12 @@
+[package]
+name = "scoplen-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Scoplen managed access gateway service."
+
+[lints]
+workspace = true
+
+\n

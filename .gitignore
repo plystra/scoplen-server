@@ -1,0 +1,6 @@
+/target/
+.cargo/config.toml
+data/
+.env
+node_modules/
+\n

@@ -1,0 +1,12 @@
+[package]
+name = "scoplen-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Scoplen administration CLI library."
+
+[lints]
+workspace = true
+
+\n

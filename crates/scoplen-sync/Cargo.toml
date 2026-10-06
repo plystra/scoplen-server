@@ -11,10 +11,12 @@ axum.workspace = true
 scoplen-api = { git = "https://github.com/plystra/scoplen-proto.git", rev = "cc549fd" }
 scoplen-model = { git = "https://github.com/plystra/scoplen-proto.git", rev = "cc549fd" }
 scoplen-store = { path = "../scoplen-store" }
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+futures-util = "0.3.34"
+tokio-tungstenite = "0.26.2"
 tower = "0.5.2"
 
 [lints]

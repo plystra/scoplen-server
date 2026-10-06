@@ -17,13 +17,15 @@ version plus 20 retained versions, and acknowledged or expired tombstones advanc
 horizon while deleting their retained history.
 Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for account key bundles, changes,
-snapshots, version reads, object writes, and acknowledgements. It requires an injected
-authenticator that binds DPoP proofs to the request method and URI, authorizes vault and account-key
-operations, validates account-key signatures and active-device wraps, and validates encrypted
-envelopes before storage; the baseline listener does not mount this router. PostgreSQL, object
-storage, production identity/authentication, policy filtering, retention scheduling and
-membership-aware purge orchestration, audit, control, gateway, and console behavior are still
-roadmap work.
+snapshots, version reads, object writes, acknowledgements, and the authenticated
+`/sync/v1/notify` WebSocket. The notification adapter accepts an opaque first credential message,
+applies an injected device policy, and fans out deterministic CBOR events through a caller-owned
+local hub. It requires an injected authenticator that binds DPoP proofs to the request method and
+URI, authorizes vault, account-key, and notification operations, validates account-key signatures
+and active-device wraps, and validates encrypted envelopes before storage; the baseline listener
+does not mount this router. PostgreSQL, object storage, production identity/authentication, policy
+filtering, retention scheduling and membership-aware purge orchestration, multi-instance
+notification fan-out, audit, control, gateway, and console behavior are still roadmap work.
 ACME TLS-ALPN-01 issuance remains unavailable.
 
 ## Repository shape

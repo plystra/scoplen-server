@@ -8,11 +8,13 @@
 
 #![forbid(unsafe_code)]
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
+use crate::notify::NotificationHub;
 use axum::{
     Router,
     body::Bytes,
+    extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     extract::{Path, RawQuery, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
@@ -21,11 +23,17 @@ use axum::{
 use scoplen_api::{ErrorCode, ProblemDetails, sync as api};
 use scoplen_model::cbor::{self, Value};
 use scoplen_store::{SqliteStore, account_keys as key_storage, sync as storage};
+use tokio::sync::broadcast;
 use uuid::{Uuid, Variant};
 
 /// The maximum request body accepted by the write endpoint. The CBOR codec applies the same
 /// limit before decoding, and the router applies it before allocating a handler body.
 pub const MAX_REQUEST_BYTES: usize = storage::MAX_BATCH_BYTES;
+
+/// Maximum size of the first WebSocket message handed to the notification authenticator.
+pub const MAX_NOTIFICATION_AUTH_BYTES: usize = 16 * 1024;
+
+const NOTIFICATION_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The operation requested from the authenticator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -189,6 +197,37 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         account_id: key_storage::AccountId,
         update: &api::SyncAccountKeyBundleUpdate,
     ) -> Result<(), AuthFailure>;
+
+    /// Authenticate the first binary message on a notification WebSocket.
+    ///
+    /// The message is intentionally opaque to this adapter because the identity service owns the
+    /// DPoP-bound token and proof encoding. Implementations MUST bind the credentials to `uri`,
+    /// reject missing, malformed, expired, or revoked credentials, and return an enrolled device.
+    /// The adapter limits the message to [`MAX_NOTIFICATION_AUTH_BYTES`] before calling this
+    /// method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication problem when the first message is not valid credentials.
+    fn authenticate_notification(
+        &self,
+        _uri: &Uri,
+        _first_message: &[u8],
+    ) -> Result<AuthenticatedDevice, AuthFailure> {
+        Err(notification_authentication_required())
+    }
+
+    /// Authorize an authenticated device to receive content-free notifications.
+    ///
+    /// Implementations MUST apply account and device lifecycle policy before allowing the socket
+    /// to remain open. The default fails closed until identity V3 supplies this boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication or policy problem when notifications are not allowed.
+    fn authorize_notifications(&self, _identity: AuthenticatedDevice) -> Result<(), AuthFailure> {
+        Err(notification_authentication_required())
+    }
 }
 
 /// Build the K-4 router with an explicit authentication implementation.
@@ -196,9 +235,23 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
 /// The returned router is not mounted by the baseline server listener until identity V3 is
 /// available. Tests and a future identity service can mount it with their own authenticator.
 pub fn router<A: SyncAuthenticator>(store: Arc<SqliteStore>, authenticator: A) -> Router {
-    let state = SyncHttpState { store, authenticator };
+    router_with_notifications(store, authenticator, NotificationHub::default())
+}
+
+/// Build the sync router with a caller-owned local notification hub.
+///
+/// A deployment publishes content-free events to this hub after committing a change. The hub is
+/// intentionally local to one process; PostgreSQL fan-out for multi-instance deployments remains
+/// a V5 operation-layer concern.
+pub fn router_with_notifications<A: SyncAuthenticator>(
+    store: Arc<SqliteStore>,
+    authenticator: A,
+    notifications: NotificationHub,
+) -> Router {
+    let state = SyncHttpState { store, authenticator, notifications };
     Router::new()
         .route("/sync/v1/keys", get(keys_get::<A>).put(keys_put::<A>))
+        .route("/sync/v1/notify", get(notify::<A>))
         .route("/sync/v1/vaults/{vault}/changes", get(changes::<A>))
         .route("/sync/v1/vaults/{vault}/snapshot", get(snapshot::<A>))
         .route("/sync/v1/vaults/{vault}/objects/{object}/versions", get(versions::<A>))
@@ -212,6 +265,85 @@ pub fn router<A: SyncAuthenticator>(store: Arc<SqliteStore>, authenticator: A) -
 struct SyncHttpState<A> {
     store: Arc<SqliteStore>,
     authenticator: A,
+    notifications: NotificationHub,
+}
+
+async fn notify<A: SyncAuthenticator>(
+    ws: WebSocketUpgrade,
+    State(state): State<SyncHttpState<A>>,
+    uri: Uri,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| notification_session(socket, state, uri))
+}
+
+async fn notification_session<A: SyncAuthenticator>(
+    mut socket: WebSocket,
+    state: SyncHttpState<A>,
+    uri: Uri,
+) {
+    let first_message = match tokio::time::timeout(NOTIFICATION_AUTH_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(Message::Binary(message)))) if message.len() <= MAX_NOTIFICATION_AUTH_BYTES => {
+            message
+        }
+        Ok(Some(Ok(Message::Binary(_)))) => {
+            close_notification(&mut socket, "sync.invalid_request").await;
+            return;
+        }
+        Ok(Some(Ok(_) | Err(_)) | None) | Err(_) => {
+            close_notification(&mut socket, "auth.authentication_required").await;
+            return;
+        }
+    };
+    let identity = match state.authenticator.authenticate_notification(&uri, &first_message) {
+        Ok(identity) => identity,
+        Err(error) => {
+            close_notification(&mut socket, error.code.as_str()).await;
+            return;
+        }
+    };
+    if let Err(error) = state.authenticator.authorize_notifications(identity) {
+        close_notification(&mut socket, error.code.as_str()).await;
+        return;
+    }
+
+    let mut events = state.notifications.subscribe(identity.device_id);
+    loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(payload) => {
+                    if socket.send(Message::Binary(payload.into())).await.is_err() {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    close_notification(&mut socket, "sync.notification_lagged").await;
+                    return;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+}
+
+async fn close_notification(socket: &mut WebSocket, code: &str) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame { code: 1008, reason: code.to_owned().into() })))
+        .await;
+}
+
+fn notification_authentication_required() -> AuthFailure {
+    AuthFailure::new(
+        StatusCode::UNAUTHORIZED,
+        "auth.authentication_required",
+        "Authentication required",
+        "The notification socket credentials are missing or invalid; reconnect after authenticating.",
+        false,
+    )
+    .expect("static notification authentication failure is valid")
 }
 
 async fn keys_get<A: SyncAuthenticator>(
@@ -854,9 +986,12 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, header::AUTHORIZATION};
+    use futures_util::{SinkExt, StreamExt};
     use scoplen_api::sync::{
         SyncAckRequest, SyncChangesResponse, SyncWriteBatch, SyncWriteBatchResponse,
     };
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     use tower::ServiceExt;
 
     use super::*;
@@ -994,6 +1129,43 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn authenticate_notification(
+            &self,
+            _uri: &Uri,
+            first_message: &[u8],
+        ) -> Result<AuthenticatedDevice, AuthFailure> {
+            if first_message == b"notify-test-token" {
+                Ok(AuthenticatedDevice { device_id: self.device_id })
+            } else {
+                Err(AuthFailure::new(
+                    StatusCode::UNAUTHORIZED,
+                    "auth.authentication_required",
+                    "Authentication required",
+                    "A valid notification credential is required; reconnect after authentication.",
+                    false,
+                )
+                .expect("test notification auth failure"))
+            }
+        }
+
+        fn authorize_notifications(
+            &self,
+            _identity: AuthenticatedDevice,
+        ) -> Result<(), AuthFailure> {
+            if self.allowed {
+                Ok(())
+            } else {
+                Err(AuthFailure::new(
+                    StatusCode::FORBIDDEN,
+                    "policy.denied",
+                    "Notification access denied",
+                    "The device is not authorized for sync notifications; reconnect after policy changes.",
+                    false,
+                )
+                .expect("test notification policy failure"))
+            }
+        }
     }
 
     async fn test_store() -> (Arc<SqliteStore>, storage::VaultId, storage::DeviceId) {
@@ -1031,6 +1203,81 @@ mod tests {
             recovery_blob: vec![9, 10],
             signature: vec![0x11; api::SYNC_KEY_SIGNATURE_BYTES],
         }
+    }
+
+    async fn notification_server(
+        app: Router,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind notification listener");
+        let address = listener.local_addr().expect("notification listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve notification router");
+        });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn notification_socket_authenticates_and_receives_targeted_events() {
+        let (store, _vault, device) = test_store().await;
+        let hub = NotificationHub::default();
+        let app =
+            router_with_notifications(store, TestAuthenticator::new(device, true), hub.clone());
+        let (address, server) = notification_server(app).await;
+        let (mut socket, _) = connect_async(format!("ws://{address}/sync/v1/notify"))
+            .await
+            .expect("notification websocket");
+        socket
+            .send(ClientMessage::Binary(b"notify-test-token".to_vec().into()))
+            .await
+            .expect("send notification credentials");
+
+        let event = api::SyncNotification::VaultAdvanced { vault: Uuid::now_v7(), seq: 4 };
+        for _ in 0..100 {
+            if hub.receiver_count(device) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(hub.publish(device, &event).expect("encode event"), 1);
+        let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .expect("notification delivery timeout")
+            .expect("notification socket message")
+            .expect("notification websocket frame");
+        let ClientMessage::Binary(payload) = message else {
+            panic!("notification payload is not binary");
+        };
+        assert_eq!(api::SyncNotification::from_cbor(&payload).expect("notification cbor"), event);
+        socket.close(None).await.expect("close notification websocket");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn notification_socket_closes_on_invalid_first_message() {
+        let (store, _vault, device) = test_store().await;
+        let app = router_with_notifications(
+            store,
+            TestAuthenticator::new(device, true),
+            NotificationHub::default(),
+        );
+        let (address, server) = notification_server(app).await;
+        let (mut socket, _) = connect_async(format!("ws://{address}/sync/v1/notify"))
+            .await
+            .expect("notification websocket");
+        socket
+            .send(ClientMessage::Binary(b"bad-token".to_vec().into()))
+            .await
+            .expect("send invalid credentials");
+        let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .expect("close timeout")
+            .expect("close frame")
+            .expect("notification websocket frame");
+        let ClientMessage::Close(Some(frame)) = message else {
+            panic!("invalid credentials did not close the socket");
+        };
+        assert_eq!(frame.reason, "auth.authentication_required");
+        server.abort();
     }
 
     #[tokio::test]

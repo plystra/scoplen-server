@@ -28,7 +28,10 @@ compare-and-swap base before changing state, and exposes current change and full
 snapshot pages without interpreting envelope bytes. A migration error prevents those roles from
 starting. `/readyz` queries the database and returns 503 when the query fails. Public HTTP/auth
 endpoints are still unmounted by the baseline listener; the injected sync router now covers the
-account-key and object-sync boundaries but still delegates authentication, signature verification,
-membership, and policy decisions to the service. Policy filtering, version retention and tombstone
-purge workers, PostgreSQL, parallel migration equivalence, application-level column encryption,
-object storage, audit, and other worker jobs remain roadmap work.
+account-key, object-sync, and local notification boundaries but still delegates authentication,
+signature verification, membership, and policy decisions to the service. Notification events are
+encoded by `scoplen-api` and delivered only to authenticated device subscriptions through a
+process-local broadcast hub; PostgreSQL `LISTEN`/`NOTIFY` fan-out and event publication from the
+identity and vault services remain open. Policy filtering, version retention and tombstone purge
+workers, PostgreSQL, parallel migration equivalence, application-level column encryption, object
+storage, audit, and other worker jobs remain roadmap work.

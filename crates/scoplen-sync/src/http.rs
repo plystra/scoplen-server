@@ -14,7 +14,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::{Path, RawQuery, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -91,17 +91,24 @@ impl AuthFailure {
 /// Identity and authorization boundary required by the sync HTTP adapter.
 ///
 /// Implementations MUST validate the Authorization `DPoP` access token and its accompanying
-/// `DPoP` proof before returning an identity. They MUST reject missing, malformed, expired, or revoked
-/// credentials and enforce vault membership for the requested operation. This trait has no
-/// default implementation so the server cannot accidentally ship an unauthenticated endpoint.
+/// `DPoP` proof before returning an identity. The proof's `htm` and `htu` claims MUST be checked
+/// against the supplied request method and URI, in addition to rejecting missing, malformed,
+/// expired, or revoked credentials. Implementations also enforce vault membership for the
+/// requested operation. This trait has no default implementation so the server cannot
+/// accidentally ship an unauthenticated endpoint.
 pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
-    /// Authenticate the request headers as one enrolled device.
+    /// Authenticate one request as an enrolled device, including its `DPoP` method and URI binding.
     ///
     /// # Errors
     ///
     /// Returns an authentication problem when the access token or proof is missing, invalid,
     /// expired, or revoked.
-    fn authenticate(&self, headers: &HeaderMap) -> Result<AuthenticatedDevice, AuthFailure>;
+    fn authenticate(
+        &self,
+        method: &Method,
+        uri: &Uri,
+        headers: &HeaderMap,
+    ) -> Result<AuthenticatedDevice, AuthFailure>;
 
     /// Authorize the device for one vault operation.
     ///
@@ -113,6 +120,22 @@ pub trait SyncAuthenticator: Clone + Send + Sync + 'static {
         identity: AuthenticatedDevice,
         vault: storage::VaultId,
         operation: SyncOperation,
+    ) -> Result<(), AuthFailure>;
+
+    /// Validate the decoded write envelopes before storage.
+    ///
+    /// Implementations MUST validate the envelope structure, key epoch, signer certificate,
+    /// membership, and signature for every write. The adapter only enforces wire shape and size;
+    /// this hook is the required cryptographic and policy validation boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an authentication or policy problem when a write is not valid for the vault.
+    fn validate_write(
+        &self,
+        identity: AuthenticatedDevice,
+        vault: storage::VaultId,
+        writes: &[api::SyncWrite],
     ) -> Result<(), AuthFailure>;
 }
 
@@ -142,11 +165,14 @@ async fn changes<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
     RawQuery(query): RawQuery,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
-    let identity = authorize(&state, &headers, vault, SyncOperation::Read, &instance)?;
+    let identity =
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Read, &instance)?;
     let query = parse_query(query, &instance)?;
     let page = state
         .store
@@ -171,11 +197,14 @@ async fn snapshot<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
     RawQuery(query): RawQuery,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
-    let identity = authorize(&state, &headers, vault, SyncOperation::Snapshot, &instance)?;
+    let identity =
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Snapshot, &instance)?;
     let query = parse_query(query, &instance)?;
     let page = state
         .store
@@ -199,12 +228,15 @@ async fn snapshot<A: SyncAuthenticator>(
 async fn versions<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path((vault, object)): Path<(String, String)>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     let vault = parse_uuid(&vault, "vault", &instance)?;
     let object = parse_uuid(&object, "object", &instance)?;
-    let identity = authorize(&state, &headers, vault, SyncOperation::Versions, &instance)?;
+    let identity =
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Versions, &instance)?;
     let versions = state
         .store
         .sync_versions(vault, object)
@@ -224,13 +256,16 @@ async fn versions<A: SyncAuthenticator>(
 async fn objects<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
-    let identity = authorize(&state, &headers, vault, SyncOperation::Write, &instance)?;
+    let identity =
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Write, &instance)?;
     if state
         .store
         .sync_vault_kind(vault)
@@ -263,6 +298,10 @@ async fn objects<A: SyncAuthenticator>(
     if total_bytes.is_none_or(|total| total > storage::MAX_BATCH_BYTES) {
         return Err(SyncHttpError::invalid(&instance, "write envelopes exceed the sync limits"));
     }
+    state
+        .authenticator
+        .validate_write(identity, vault, &batch.writes)
+        .map_err(|error| SyncHttpError::from_auth(error, &instance))?;
     let writes = batch
         .writes
         .iter()
@@ -299,13 +338,16 @@ async fn objects<A: SyncAuthenticator>(
 async fn ack<A: SyncAuthenticator>(
     State(state): State<SyncHttpState<A>>,
     Path(vault): Path<String>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> SyncResult<Response> {
     let instance = request_id(&headers);
     require_cbor(&headers, &instance)?;
     let vault = parse_uuid(&vault, "vault", &instance)?;
-    let identity = authorize(&state, &headers, vault, SyncOperation::Acknowledge, &instance)?;
+    let identity =
+        authorize(&state, &method, &uri, &headers, vault, SyncOperation::Acknowledge, &instance)?;
     let request = api::SyncAckRequest::from_cbor(&body).map_err(|error| {
         SyncHttpError::invalid(&instance, format!("invalid acknowledgement: {error}"))
     })?;
@@ -321,6 +363,8 @@ async fn ack<A: SyncAuthenticator>(
 
 fn authorize<A: SyncAuthenticator>(
     state: &SyncHttpState<A>,
+    method: &Method,
+    uri: &Uri,
     headers: &HeaderMap,
     vault: storage::VaultId,
     operation: SyncOperation,
@@ -328,7 +372,7 @@ fn authorize<A: SyncAuthenticator>(
 ) -> SyncResult<AuthenticatedDevice> {
     let identity = state
         .authenticator
-        .authenticate(headers)
+        .authenticate(method, uri, headers)
         .map_err(|error| SyncHttpError::from_auth(error, instance))?;
     state
         .authenticator
@@ -547,8 +591,8 @@ fn encode_conflicts(
     else {
         return Err("problem details did not encode as a map".into());
     };
-    // The adapter keeps an entry for every stale object. A missing current row is represented by
-    // an explicit null so clients can distinguish it from a truncated conflict response.
+    // The pre-Stable extension keeps every stale object identifiable. A missing current row is
+    // represented by null so clients can distinguish it from a truncated conflict response.
     let entries = conflicts
         .iter()
         .map(|conflict| {
@@ -576,6 +620,8 @@ fn encode_conflicts(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, header::AUTHORIZATION};
     use scoplen_api::sync::{
@@ -589,10 +635,33 @@ mod tests {
     struct TestAuthenticator {
         device_id: storage::DeviceId,
         allowed: bool,
+        /// Test-only stand-in for the crypto and membership validator injected in production.
+        reject_writes: bool,
+        seen_requests: Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl TestAuthenticator {
+        fn new(device_id: storage::DeviceId, allowed: bool) -> Self {
+            Self {
+                device_id,
+                allowed,
+                reject_writes: false,
+                seen_requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     impl SyncAuthenticator for TestAuthenticator {
-        fn authenticate(&self, headers: &HeaderMap) -> Result<AuthenticatedDevice, AuthFailure> {
+        fn authenticate(
+            &self,
+            method: &Method,
+            uri: &Uri,
+            headers: &HeaderMap,
+        ) -> Result<AuthenticatedDevice, AuthFailure> {
+            self.seen_requests
+                .lock()
+                .expect("request recorder lock")
+                .push((method.to_string(), uri.to_string()));
             if headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok())
                 != Some("DPoP test-token")
                 || headers.get("dpop").is_none()
@@ -628,6 +697,26 @@ mod tests {
                 .expect("test policy failure"))
             }
         }
+
+        fn validate_write(
+            &self,
+            _identity: AuthenticatedDevice,
+            _vault: storage::VaultId,
+            _writes: &[api::SyncWrite],
+        ) -> Result<(), AuthFailure> {
+            if self.reject_writes {
+                Err(AuthFailure::new(
+                    StatusCode::BAD_REQUEST,
+                    "sync.invalid_request",
+                    "Invalid sync envelope",
+                    "The injected envelope validator rejected this write; no data changed and retrying will not help.",
+                    false,
+                )
+                .expect("test envelope failure"))
+            } else {
+                Ok(())
+            }
+        }
     }
 
     async fn test_store() -> (Arc<SqliteStore>, storage::VaultId, storage::DeviceId) {
@@ -648,9 +737,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn passes_dpop_request_target_to_authenticator() {
+        let (store, vault, device) = test_store().await;
+        let authenticator = TestAuthenticator::new(device, true);
+        let seen_requests = authenticator.seen_requests.clone();
+        let app = router(store, authenticator);
+        let uri = format!("/sync/v1/vaults/{}/ack", path(vault));
+        let request = request_headers(
+            Request::builder()
+                .method("POST")
+                .uri(&uri)
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(SyncAckRequest { cursor: 0 }.to_cbor().expect("ack")))
+        .expect("request");
+        let response = app.oneshot(request).await.expect("ack response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            seen_requests.lock().expect("request recorder lock").as_slice(),
+            &[("POST".into(), uri)]
+        );
+    }
+
+    #[tokio::test]
     async fn changes_ack_and_write_round_trip_through_cbor() {
         let (store, vault, device) = test_store().await;
-        let app = router(store.clone(), TestAuthenticator { device_id: device, allowed: true });
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
         let object = Uuid::now_v7();
         let write = SyncWriteBatch {
             writes: vec![api::SyncWrite {
@@ -705,7 +817,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_auth_content_type_query_and_ahead_cursor() {
         let (store, vault, device) = test_store().await;
-        let app = router(store, TestAuthenticator { device_id: device, allowed: true });
+        let app = router(store, TestAuthenticator::new(device, true));
         let request = Request::builder()
             .uri(format!("/sync/v1/vaults/{}/changes?after=00&limit=1", path(vault)))
             .body(Body::empty())
@@ -753,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn conflict_problem_contains_current_change_extension() {
         let (store, vault, device) = test_store().await;
-        let app = router(store, TestAuthenticator { device_id: device, allowed: true });
+        let app = router(store, TestAuthenticator::new(device, true));
         let object = Uuid::now_v7();
         let make_request = |batch: SyncWriteBatch| {
             request_headers(
@@ -828,9 +940,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn injected_write_validator_rejects_before_storage() {
+        let (store, vault, device) = test_store().await;
+        let mut authenticator = TestAuthenticator::new(device, true);
+        authenticator.reject_writes = true;
+        let app = router(store.clone(), authenticator);
+        let write = SyncWriteBatch {
+            writes: vec![api::SyncWrite {
+                object_id: Uuid::now_v7(),
+                base_seq: None,
+                payload: vec![0xff],
+                tombstone: false,
+            }],
+        };
+        let request = request_headers(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sync/v1/vaults/{}/objects", path(vault)))
+                .header(header::CONTENT_TYPE, "application/cbor"),
+        )
+        .body(Body::from(write.to_cbor().expect("encode write")))
+        .expect("request");
+        let response = app.oneshot(request).await.expect("validator response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("problem body");
+        let problem = ProblemDetails::from_cbor(&body).expect("validator problem");
+        assert_eq!(problem.code.as_str(), "sync.invalid_request");
+
+        let app = router(store, TestAuthenticator::new(device, true));
+        let request = request_headers(
+            Request::builder()
+                .uri(format!("/sync/v1/vaults/{}/changes?after=0&limit=10", path(vault))),
+        )
+        .body(Body::empty())
+        .expect("request");
+        let response = app.oneshot(request).await.expect("changes response");
+        let body = to_bytes(response.into_body(), MAX_REQUEST_BYTES).await.expect("changes body");
+        let changes = SyncChangesResponse::from_cbor(&body).expect("changes response");
+        assert_eq!(changes.changes.len(), 0);
+    }
+
+    #[tokio::test]
     async fn policy_denied_before_storage_and_organization_is_read_only() {
         let (store, vault, device) = test_store().await;
-        let app = router(store.clone(), TestAuthenticator { device_id: device, allowed: false });
+        let app = router(store.clone(), TestAuthenticator::new(device, false));
         let request = request_headers(
             Request::builder()
                 .uri(format!("/sync/v1/vaults/{}/changes?after=0&limit=1", path(vault))),
@@ -845,7 +998,7 @@ mod tests {
             .create_sync_vault(organization_vault, storage::VaultKind::Organization)
             .await
             .expect("create organization vault");
-        let app = router(store.clone(), TestAuthenticator { device_id: device, allowed: true });
+        let app = router(store.clone(), TestAuthenticator::new(device, true));
         let write = SyncWriteBatch {
             writes: vec![api::SyncWrite {
                 object_id: Uuid::now_v7(),

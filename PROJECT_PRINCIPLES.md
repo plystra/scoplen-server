@@ -17,10 +17,11 @@ self-hosted server, host agent, administration CLI, and web console.
 ## Open gaps
 
 - ACME TLS-ALPN-01 issuance and renewal are not implemented.
-- SQLite migration, transaction, initial sync storage, and an atomic retention primitive exist.
-  Public sync endpoints, authentication, membership-aware purge scheduling, PostgreSQL, object
-  storage, identity, policy, certificate, gateway, audit, agent, CLI, and console behavior remain
-  on the roadmap.
+- SQLite migration, transaction, initial sync storage, an atomic retention primitive, and an
+  explicitly authenticated K-4 HTTP/CBOR adapter exist. The baseline listener does not mount the
+  adapter until production identity is available. Membership-aware purge scheduling, PostgreSQL,
+  object storage, identity, policy, certificate, gateway, audit, agent, CLI, and console behavior
+  remain on the roadmap.
 - Deployment, backup/restore, upgrade, and release artifacts require their own validated gates.
 
 ## Review

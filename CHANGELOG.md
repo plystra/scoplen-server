@@ -4,6 +4,10 @@ Changes are recorded here for released or reviewable repository outcomes.
 
 ## Unreleased
 
+- Added the K-4 HTTP/CBOR adapter for changes, snapshots, retained versions, object writes, and
+  acknowledgements. The adapter requires an injected DPoP-bound authenticator and a write-envelope
+  validator, maps storage failures to problem-details codes, and remains unmounted by the baseline
+  listener until identity and policy services are implemented.
 - Added an atomic SQLite sync retention pass that bounds history to the current version plus 20
   retained versions, purges acknowledged or 180-day-old tombstones, and advances the purge horizon
   without making membership or policy decisions in the storage layer.

@@ -16,9 +16,12 @@ also exposes an atomic retention pass for the worker: historical rows are bounde
 version plus 20 retained versions, and acknowledged or expired tombstones advance the purge
 horizon while deleting their retained history.
 Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
-PostgreSQL, object storage, public sync endpoints and authentication, envelope validation, retention
-scheduling and membership-aware purge orchestration, audit, identity, control, gateway, and console
-behavior are still roadmap work.
+The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for changes, snapshots, version reads,
+object writes, and acknowledgements. It requires an injected authenticator that binds DPoP proofs to
+the request method and URI, authorizes vault operations, and validates encrypted envelopes before
+storage; the baseline listener does not mount this router. PostgreSQL, object storage, production
+identity/authentication, policy filtering, retention scheduling and membership-aware purge
+orchestration, audit, control, gateway, and console behavior are still roadmap work.
 ACME TLS-ALPN-01 issuance remains unavailable.
 
 ## Repository shape

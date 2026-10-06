@@ -17,8 +17,9 @@ self-hosted server, host agent, administration CLI, and web console.
 ## Open gaps
 
 - ACME TLS-ALPN-01 issuance and renewal are not implemented.
-- SQLite migration and transaction foundations exist. PostgreSQL, object storage, identity, sync,
-  policy, certificate, gateway, audit, agent, CLI, and console behavior remain on the roadmap.
+- SQLite migration, transaction, and initial sync storage foundations exist. Public sync endpoints,
+  PostgreSQL, object storage, identity, policy, certificate, gateway, audit, agent, CLI, and
+  console behavior remain on the roadmap.
 - Deployment, backup/restore, upgrade, and release artifacts require their own validated gates.
 
 ## Review

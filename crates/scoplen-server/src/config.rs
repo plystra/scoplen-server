@@ -112,6 +112,11 @@ impl Config {
         }
         resolve_roles(&self.roles.names)
             .map_err(|error| ConfigError::Invalid(error.to_string()))?;
+        if self.storage.backend != "sqlite" {
+            return Err(ConfigError::Invalid(
+                "storage.backend must be sqlite; PostgreSQL support is not available yet".into(),
+            ));
+        }
         match self.tls.mode {
             TlsMode::Files => {
                 if self.tls.cert_file.is_none() || self.tls.key_file.is_none() {
@@ -248,7 +253,7 @@ impl Default for RoleSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct StorageSettings {
-    /// `sqlite` is the Personal and Team default; PostgreSQL is selected explicitly.
+    /// `sqlite` is the Personal and Team default; PostgreSQL is reserved for V2.
     pub backend: String,
 }
 
@@ -300,5 +305,15 @@ mod tests {
         config.tls.mode = TlsMode::Files;
         let error = config.validate().expect_err("missing files must be rejected");
         assert!(error.to_string().contains("cert_file and tls.key_file"));
+    }
+
+    #[test]
+    fn unsupported_storage_backends_are_rejected() {
+        let mut config = Config::default();
+        config.storage.backend = "postgres".into();
+        let error = config.validate().expect_err("PostgreSQL is not implemented");
+        assert!(error.to_string().contains("storage.backend"));
+        config.storage.backend = "unknown".into();
+        assert!(config.validate().is_err());
     }
 }

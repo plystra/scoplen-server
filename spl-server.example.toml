@@ -15,4 +15,5 @@ trusted_proxies = []
 names = ["all"]
 
 [storage]
+# SQLite is the only implemented backend. The file is data_dir/scoplen.sqlite.
 backend = "sqlite"

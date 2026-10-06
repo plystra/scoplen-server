@@ -4,7 +4,9 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, ValueEnum};
-use scoplen_server::{Config, Role, ServerError, VERSION, bootstrap, resolve_roles};
+use scoplen_server::{
+    Config, Role, ServerError, VERSION, bootstrap, initialize_store, resolve_roles,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -78,11 +80,12 @@ async fn run() -> Result<(), ServerError> {
     let roles = resolve_roles(&role_names).map_err(|error| {
         ServerError::Config(scoplen_server::ConfigError::Invalid(error.to_string()))
     })?;
+    let store = initialize_store(&config).await?;
     let bootstrap = bootstrap(&config)?;
     if let Some(link) = bootstrap.setup_link {
         println!("first-run setup link (valid for one hour): {link}");
     }
-    scoplen_server::run_roles(config, roles).await
+    scoplen_server::run_roles(config, roles, store).await
 }
 
 // Keep the public role names visible to rustdoc and downstream CLI tooling.

@@ -8,9 +8,10 @@ Scoplen is a Plystra project. This repository is licensed under AGPL-3.0-only.
 Maturity: Exploration. Maintenance: Active. The repository baseline is under development. The
 current binary provides role selection, validated TOML and `SPL_` environment configuration,
 first-run deployment material, a single public listener, health/readiness/metrics endpoints, and
-plain or file-based TLS. ACME TLS-ALPN-01 issuance and the storage, identity, sync, control,
-gateway, and console product behavior are planned roadmap work and are not implied by this
-baseline.
+plain or file-based TLS. It now opens a durable SQLite database in WAL mode and applies its first
+forward migration before starting roles; readiness checks that database. PostgreSQL and the
+remaining storage, audit, identity, sync, control, gateway, and console behavior are still roadmap
+work. ACME TLS-ALPN-01 issuance remains unavailable.
 
 ## Repository shape
 
@@ -39,9 +40,12 @@ Run `cargo run -p scoplen-server -- --help` for role selection and configuration
 Personal defaults bind to `127.0.0.1:8443` and use a local data directory. A reverse proxy may
 terminate TLS and select `tls.mode = "plain"`; direct TLS uses `tls.mode = "files"` with a PEM
 certificate and key. `tls.mode = "acme"` is reserved until the ACME implementation lands.
+The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run on startup and a
+migration failure stops startup. `storage.backend` currently accepts only `sqlite`.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md). Generated deployment keys, CA keys, and setup links are private
-deployment material; keep the data directory out of source control and backups that are not
-protected by the operator.
+See [SECURITY.md](SECURITY.md). The SQLite database, generated deployment keys, CA keys, and setup
+links are private deployment material; keep the data directory out of source control and unprotected
+backups. Copying only `scoplen.sqlite` while the server is running is not a consistent backup in WAL
+mode. Built-in backup and restore are still roadmap work.

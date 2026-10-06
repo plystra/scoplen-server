@@ -19,6 +19,7 @@ rcgen.workspace = true
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
+scoplen-store = { path = "../scoplen-store" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

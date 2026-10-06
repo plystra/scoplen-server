@@ -11,6 +11,9 @@ pub enum ServerError {
     /// Configuration could not be read or parsed.
     #[error("configuration error: {0}")]
     Config(#[from] crate::ConfigError),
+    /// Persistent storage could not be initialized.
+    #[error("storage error: {0}")]
+    Storage(#[from] scoplen_store::StoreError),
     /// The data directory could not be initialized.
     #[error("could not initialize data directory {path}: {source}")]
     DataDirectory {

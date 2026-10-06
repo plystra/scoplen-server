@@ -14,3 +14,12 @@ at startup until TLS-ALPN-01 is implemented.
 The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracing events; secret
 material is written only under the configured data directory and is never included in request
 responses or logs.
+
+The relational storage boundary currently supports SQLite only. Startup opens
+`server.data_dir/scoplen.sqlite`, enables WAL and foreign keys on pooled connections, and applies
+embedded forward migrations before generating first-run material. The first migration establishes
+the organization table with
+identifier, nonempty name, and creation-time constraints. A migration error prevents roles from
+starting. `/readyz` queries the database and returns 503 when the query fails. PostgreSQL,
+parallel migration equivalence, application-level column encryption, object storage, audit,
+and worker jobs remain V2 work.

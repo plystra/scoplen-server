@@ -24,6 +24,12 @@ pub const MAX_BATCH_OBJECTS: usize = 500;
 pub const MAX_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// Maximum page size from the sync protocol.
 pub const MAX_PAGE_SIZE: u16 = 1_000;
+/// Number of milliseconds in one day, used by retention workers.
+const MILLIS_PER_DAY: i64 = 86_400_000;
+/// Historical versions are retained for at most this many days.
+pub const VERSION_RETENTION_DAYS: i64 = 30;
+/// Tombstones are eligible for time-based purging after this many days.
+pub const TOMBSTONE_PURGE_AFTER_DAYS: i64 = 180;
 
 /// A 16-byte vault identifier. UUID version and variant validation belongs to the protocol layer.
 pub type VaultId = [u8; 16];
@@ -123,6 +129,17 @@ pub struct ConflictEntry {
     pub current: Option<SyncChange>,
 }
 
+/// Result of a retention pass over one vault.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct PurgeReport {
+    /// Historical version rows removed, including rows removed with a tombstone.
+    pub pruned_versions: u64,
+    /// Current tombstoned objects removed from the vault.
+    pub purged_tombstones: u64,
+    /// The vault's resulting purge horizon.
+    pub purge_horizon: u64,
+}
+
 /// Storage failures for sync operations.
 #[derive(Debug, Error)]
 pub enum SyncStoreError {
@@ -165,6 +182,9 @@ pub enum SyncStoreError {
     /// The requested object has no current or retained version.
     #[error("sync object does not exist")]
     ObjectNotFound,
+    /// A retention pass was supplied a negative timestamp.
+    #[error("sync retention timestamp must not be negative")]
+    InvalidRetentionTime,
     /// A stored row could not be represented by the public storage model.
     #[error("sync storage contains invalid row data: {0}")]
     CorruptRow(&'static str),
@@ -433,6 +453,122 @@ impl SqliteStore {
         .await?;
         transaction.commit().await?;
         Ok(cursor)
+    }
+
+    /// Prune old versions and purge eligible tombstones for one vault.
+    ///
+    /// The caller supplies the minimum acknowledgement cursor across every enrolled, unrevoked
+    /// device that can access the vault. Passing `None` disables acknowledgement-based tombstone
+    /// purging; the 180-day time limit still applies. This keeps membership and policy decisions
+    /// outside the storage layer while giving the worker an atomic retention operation.
+    ///
+    /// Historical rows older than the newest current version plus 20 retained versions are
+    /// removed. Tombstones are removed, together with all their retained versions, when their
+    /// sequence is at or below the supplied acknowledgement floor or their current row is at
+    /// least 180 days old. The purge horizon advances to the greatest sequence removed and never
+    /// moves backwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SyncStoreError::VaultNotFound`], [`SyncStoreError::CursorAhead`] when the
+    /// supplied acknowledgement floor exceeds the vault sequence, [`SyncStoreError::InvalidRetentionTime`]
+    /// for a negative timestamp, or [`SyncStoreError::Database`] for a database failure.
+    pub async fn purge_sync_history(
+        &self,
+        vault_id: VaultId,
+        acknowledged_through: Option<u64>,
+        now_ms: i64,
+    ) -> Result<PurgeReport, SyncStoreError> {
+        if now_ms < 0 {
+            return Err(SyncStoreError::InvalidRetentionTime);
+        }
+        let mut transaction = self.pool().begin().await?;
+        lock_vault(&mut transaction, vault_id).await?;
+        let (current_seq, existing_horizon) = vault_state(&mut transaction, vault_id).await?;
+        if let Some(cursor) = acknowledged_through
+            && cursor > current_seq
+        {
+            return Err(SyncStoreError::CursorAhead { cursor, current: current_seq });
+        }
+
+        let mut highest_removed = existing_horizon;
+        let mut pruned_versions = 0_u64;
+        let version_cutoff_ms = now_ms.saturating_sub(VERSION_RETENTION_DAYS * MILLIS_PER_DAY);
+        let tombstone_cutoff_ms =
+            now_ms.saturating_sub(TOMBSTONE_PURGE_AFTER_DAYS * MILLIS_PER_DAY);
+
+        let old_version_max = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sequence) FROM (\
+             SELECT sequence, written_at_ms, ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY sequence DESC) AS rank \
+             FROM sync_object_versions WHERE vault_id = ? \
+             ) WHERE rank > 21 OR (rank > 1 AND written_at_ms < ?)",
+        )
+        .bind(vault_id.as_slice())
+        .bind(version_cutoff_ms)
+        .fetch_one(&mut *transaction)
+        .await?
+        .map(sequence_from_sql)
+        .transpose()?;
+        if let Some(max_sequence) = old_version_max {
+            highest_removed = highest_removed.max(max_sequence);
+        }
+        let old_versions_result = sqlx::query(
+            "DELETE FROM sync_object_versions WHERE vault_id = ? AND sequence IN (\
+             SELECT sequence FROM (\
+               SELECT sequence, written_at_ms, ROW_NUMBER() OVER (PARTITION BY object_id ORDER BY sequence DESC) AS rank \
+               FROM sync_object_versions WHERE vault_id = ? \
+             ) WHERE rank > 21 OR (rank > 1 AND written_at_ms < ?))",
+        )
+        .bind(vault_id.as_slice())
+        .bind(vault_id.as_slice())
+        .bind(version_cutoff_ms)
+        .execute(&mut *transaction)
+        .await?;
+        pruned_versions = pruned_versions.saturating_add(old_versions_result.rows_affected());
+
+        let mut tombstone_query = String::from(
+            "SELECT object_id, sequence FROM sync_objects WHERE vault_id = ? AND tombstone = 1 AND written_at_ms <= ?",
+        );
+        if acknowledged_through.is_some() {
+            tombstone_query.push_str(" OR (vault_id = ? AND tombstone = 1 AND sequence <= ?)");
+        }
+        let mut query =
+            sqlx::query(&tombstone_query).bind(vault_id.as_slice()).bind(tombstone_cutoff_ms);
+        if let Some(cursor) = acknowledged_through {
+            query = query.bind(vault_id.as_slice()).bind(sequence_to_sql(cursor)?);
+        }
+        let tombstones = query.fetch_all(&mut *transaction).await?;
+        let mut purged_tombstones = 0_u64;
+        for row in tombstones {
+            let object_id_bytes: Vec<u8> = row.try_get("object_id")?;
+            let object_id = id_from_bytes(&object_id_bytes, "object_id")?;
+            let tombstone_sequence = sequence_from_sql(row.try_get("sequence")?)?;
+            highest_removed = highest_removed.max(tombstone_sequence);
+            let history = sqlx::query(
+                "DELETE FROM sync_object_versions WHERE vault_id = ? AND object_id = ?",
+            )
+            .bind(vault_id.as_slice())
+            .bind(object_id.as_slice())
+            .execute(&mut *transaction)
+            .await?;
+            pruned_versions = pruned_versions.saturating_add(history.rows_affected());
+            sqlx::query("DELETE FROM sync_objects WHERE vault_id = ? AND object_id = ?")
+                .bind(vault_id.as_slice())
+                .bind(object_id.as_slice())
+                .execute(&mut *transaction)
+                .await?;
+            purged_tombstones = purged_tombstones.saturating_add(1);
+        }
+
+        if highest_removed > existing_horizon {
+            sqlx::query("UPDATE sync_vaults SET purge_horizon = ? WHERE vault_id = ?")
+                .bind(sequence_to_sql(highest_removed)?)
+                .bind(vault_id.as_slice())
+                .execute(&mut *transaction)
+                .await?;
+        }
+        transaction.commit().await?;
+        Ok(PurgeReport { pruned_versions, purged_tombstones, purge_horizon: highest_removed })
     }
 }
 

@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use scoplen_store::{
     RelationalStore, SqliteStore,
-    sync::{ObjectWrite, SyncStoreError, VaultKind},
+    sync::{
+        ObjectWrite, SyncStoreError, TOMBSTONE_PURGE_AFTER_DAYS, VERSION_RETENTION_DAYS, VaultKind,
+    },
 };
 
 fn test_directory() -> PathBuf {
@@ -33,6 +38,21 @@ fn write(object_id: u8, base_sequence: Option<u64>, envelope: u8) -> ObjectWrite
         tombstone: false,
         signer_device_id: Some([9; 16]),
     }
+}
+
+fn tombstone(object_id: u8, base_sequence: u64) -> ObjectWrite {
+    ObjectWrite {
+        tombstone: true,
+        base_sequence: Some(base_sequence),
+        ..write(object_id, Some(base_sequence), 99)
+    }
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH).expect("clock after epoch").as_millis(),
+    )
+    .expect("current timestamp fits SQLite integer")
 }
 
 #[tokio::test]
@@ -228,6 +248,94 @@ async fn invalid_batches_and_unknown_vaults_fail_closed() {
         store.sync_versions(vault, [99; 16]).await,
         Err(SyncStoreError::ObjectNotFound)
     ));
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn retention_keeps_current_plus_twenty_and_advances_horizon() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [6; 16];
+    store.create_sync_vault(vault, VaultKind::Personal).await.expect("create vault");
+
+    for sequence in 0..25 {
+        let base = (sequence > 0).then_some(sequence);
+        store
+            .write_sync_batch(vault, &[write(1, base, u8::try_from(sequence).expect("test value"))])
+            .await
+            .expect("version");
+    }
+    let now = now_ms();
+    let report = store.purge_sync_history(vault, None, now).await.expect("retention pass");
+    assert_eq!(report.pruned_versions, 4);
+    assert_eq!(report.purged_tombstones, 0);
+    assert_eq!(report.purge_horizon, 4);
+    let versions = store.sync_versions(vault, [1; 16]).await.expect("retained versions");
+    assert_eq!(versions.len(), 21);
+    assert_eq!(versions.first().expect("oldest retained").sequence, 5);
+    assert!(matches!(
+        store.sync_changes(vault, 0, 10).await,
+        Err(SyncStoreError::CursorExpired { purge_horizon: 4 })
+    ));
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn acknowledged_or_expired_tombstones_are_purged_atomically() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [7; 16];
+    store.create_sync_vault(vault, VaultKind::Shared).await.expect("create vault");
+    store.write_sync_batch(vault, &[write(1, None, 10)]).await.expect("initial version");
+    store.write_sync_batch(vault, &[write(1, Some(1), 11)]).await.expect("second version");
+    let tombstone_receipt =
+        store.write_sync_batch(vault, &[tombstone(1, 2)]).await.expect("tombstone");
+    assert_eq!(tombstone_receipt[0].sequence, 3);
+
+    let report = store
+        .purge_sync_history(vault, Some(3), now_ms())
+        .await
+        .expect("acknowledged tombstone purge");
+    assert_eq!(report.purged_tombstones, 1);
+    assert_eq!(report.purge_horizon, 3);
+    assert!(matches!(
+        store.sync_versions(vault, [1; 16]).await,
+        Err(SyncStoreError::ObjectNotFound)
+    ));
+    assert_eq!(store.sync_snapshot(vault, 0, 10).await.expect("snapshot").objects.len(), 0);
+
+    store.write_sync_batch(vault, &[write(2, None, 20)]).await.expect("new object");
+    let old_tombstone = store.write_sync_batch(vault, &[tombstone(2, 3)]).await;
+    assert!(old_tombstone.is_err(), "the deleted object must not be resurrected with a stale base");
+
+    store.pool().close().await;
+    drop(store);
+    remove_test_directory(directory).await;
+}
+
+#[tokio::test]
+async fn retention_rejects_invalid_ack_floor_and_time() {
+    let directory = test_directory();
+    let store = SqliteStore::open(&directory.join("scoplen.sqlite")).await.expect("open store");
+    let vault = [8; 16];
+    store.create_sync_vault(vault, VaultKind::Personal).await.expect("create vault");
+    store.write_sync_batch(vault, &[write(1, None, 10)]).await.expect("write");
+    assert!(matches!(
+        store.purge_sync_history(vault, Some(2), now_ms()).await,
+        Err(SyncStoreError::CursorAhead { cursor: 2, current: 1 })
+    ));
+    assert!(matches!(
+        store.purge_sync_history(vault, None, -1).await,
+        Err(SyncStoreError::InvalidRetentionTime)
+    ));
+    assert_eq!(VERSION_RETENTION_DAYS, 30);
+    assert_eq!(TOMBSTONE_PURGE_AFTER_DAYS, 180);
 
     store.pool().close().await;
     drop(store);

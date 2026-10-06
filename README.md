@@ -11,10 +11,14 @@ first-run deployment material, a single public listener, health/readiness/metric
 plain or file-based TLS. It now opens a durable SQLite database in WAL mode and applies forward
 migrations for `api`, `worker`, and `edge` roles; readiness checks that database. The storage layer
 also has the first sync foundation: per-vault gap-free sequence allocation, atomic compare-and-swap
-batches, current change and snapshot paging, acknowledgement cursors, and bounded version reads.
+batches, current change and snapshot paging, acknowledgement cursors, and bounded version reads. It
+also exposes an atomic retention pass for the worker: historical rows are bounded to the current
+version plus 20 retained versions, and acknowledged or expired tombstones advance the purge
+horizon while deleting their retained history.
 Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
 PostgreSQL, object storage, public sync endpoints and authentication, envelope validation, retention
-and purge jobs, audit, identity, control, gateway, and console behavior are still roadmap work.
+scheduling and membership-aware purge orchestration, audit, identity, control, gateway, and console
+behavior are still roadmap work.
 ACME TLS-ALPN-01 issuance remains unavailable.
 
 ## Repository shape

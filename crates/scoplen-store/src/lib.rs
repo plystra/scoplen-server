@@ -3,6 +3,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod sync;
+
 use std::{path::Path, time::Duration};
 
 use sqlx::{

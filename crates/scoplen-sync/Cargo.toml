@@ -6,5 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 description = "Scoplen encrypted synchronization service."
 
+[dependencies]
+scoplen-store = { path = "../scoplen-store" }
+
 [lints]
 workspace = true

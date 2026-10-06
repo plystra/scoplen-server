@@ -8,11 +8,14 @@ Scoplen is a Plystra project. This repository is licensed under AGPL-3.0-only.
 Maturity: Exploration. Maintenance: Active. The repository baseline is under development. The
 current binary provides role selection, validated TOML and `SPL_` environment configuration,
 first-run deployment material, a single public listener, health/readiness/metrics endpoints, and
-plain or file-based TLS. It now opens a durable SQLite database in WAL mode and applies its first
-forward migration for `api`, `worker`, and `edge` roles; readiness checks that database. Standalone
-`ca` and `gateway` roles do not open SQLite or generate Personal setup material. PostgreSQL and the
-remaining storage, audit, identity, sync, control, gateway, and console behavior are still roadmap
-work. ACME TLS-ALPN-01 issuance remains unavailable.
+plain or file-based TLS. It now opens a durable SQLite database in WAL mode and applies forward
+migrations for `api`, `worker`, and `edge` roles; readiness checks that database. The storage layer
+also has the first sync foundation: per-vault gap-free sequence allocation, atomic compare-and-swap
+batches, current change and snapshot paging, acknowledgement cursors, and bounded version reads.
+Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
+PostgreSQL, object storage, public sync endpoints and authentication, envelope validation, retention
+and purge jobs, audit, identity, control, gateway, and console behavior are still roadmap work.
+ACME TLS-ALPN-01 issuance remains unavailable.
 
 ## Repository shape
 

@@ -20,6 +20,14 @@ pub struct BootstrapResult {
     pub setup_link: Option<String>,
 }
 
+/// Role-specific startup resources prepared before role tasks begin.
+pub struct PreparedRoles {
+    /// Database pool for roles that need relational storage.
+    pub store: Option<SqliteStore>,
+    /// First-run setup link only for roles that initialize the deployment.
+    pub setup_link: Option<String>,
+}
+
 /// Create the data directory, deployment key, internal CA, and one-time setup link as needed.
 ///
 /// # Errors
@@ -79,17 +87,23 @@ fn hex_bytes(bytes: &[u8]) -> String {
     value
 }
 
-/// Open and migrate the deployment database before first-run material is generated.
+/// Prepare only the resources required by the selected roles.
 ///
 /// # Errors
 ///
-/// Returns an error when configuration is invalid or storage cannot be initialized.
-pub async fn initialize_store(config: &Config) -> Result<SqliteStore, ServerError> {
-    config.validate()?;
-    Ok(SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?)
+/// Returns an error when role-specific configuration, database migration, or first-run material
+/// initialization fails.
+pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRoles, ServerError> {
+    config.validate_for_roles(roles)?;
+    if !roles.iter().any(|role| role.requires_store()) {
+        return Ok(PreparedRoles { store: None, setup_link: None });
+    }
+    let store = SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?;
+    let bootstrap = bootstrap(config)?;
+    Ok(PreparedRoles { store: Some(store), setup_link: bootstrap.setup_link })
 }
 
-/// Run the requested roles until Ctrl-C using initialized storage.
+/// Run the requested roles until Ctrl-C using role-specific startup resources.
 ///
 /// # Errors
 ///
@@ -97,12 +111,16 @@ pub async fn initialize_store(config: &Config) -> Result<SqliteStore, ServerErro
 pub async fn run_roles(
     config: Config,
     roles: Vec<Role>,
-    store: SqliteStore,
+    store: Option<SqliteStore>,
 ) -> Result<(), ServerError> {
-    let store = Arc::new(store);
+    if roles.iter().any(|role| role.requires_store()) && store.is_none() {
+        return Err(ServerError::MissingStore);
+    }
+    let store = store.map(Arc::new);
     let mut tasks = Vec::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
-        tasks.push(tokio::spawn(run_public_listener(config.clone(), roles.clone(), store.clone())));
+        let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
+        tasks.push(tokio::spawn(run_public_listener(config.clone(), roles.clone(), store)));
     }
     if roles.contains(&Role::Worker) {
         tasks.push(tokio::spawn(run_periodic_role("worker")));
@@ -342,8 +360,41 @@ mod tests {
         fs::write(&data_dir, "occupied").expect("create file where directory is needed");
         let mut config = Config::default();
         config.server.data_dir = data_dir.clone();
-        let result = initialize_store(&config).await;
+        let result = prepare_roles(&config, &[Role::Worker]).await;
         assert!(matches!(result, Err(ServerError::Storage(_))));
+        fs::remove_file(data_dir).expect("test file is removable");
+    }
+
+    #[tokio::test]
+    async fn standalone_ca_and_gateway_do_not_open_sqlite_or_generate_setup_material() {
+        let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
+        fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        config.storage.backend = "postgres".into();
+
+        for roles in [vec![Role::Ca], vec![Role::Gateway], vec![Role::Ca, Role::Gateway]] {
+            let prepared = prepare_roles(&config, &roles).await.expect("roles need no database");
+            assert!(prepared.store.is_none());
+            assert!(prepared.setup_link.is_none());
+        }
+        assert_eq!(fs::read(&data_dir).expect("original file remains"), b"occupied");
+        fs::remove_file(data_dir).expect("test file is removable");
+    }
+
+    #[tokio::test]
+    async fn api_worker_and_edge_still_require_sqlite() {
+        let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
+        fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+
+        for role in [Role::Api, Role::Worker, Role::Edge] {
+            let result = prepare_roles(&config, &[role]).await;
+            assert!(matches!(result, Err(ServerError::Storage(_))), "{role} must open SQLite");
+        }
+        let result = run_roles(config, vec![Role::Api], None).await;
+        assert!(matches!(result, Err(ServerError::MissingStore)));
         fs::remove_file(data_dir).expect("test file is removable");
     }
 }

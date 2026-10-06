@@ -11,7 +11,7 @@ mod runtime;
 pub use config::{Config, ConfigError, TlsMode};
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};
-pub use runtime::{BootstrapResult, bootstrap, initialize_store, run_roles};
+pub use runtime::{BootstrapResult, PreparedRoles, bootstrap, prepare_roles, run_roles};
 
 /// The server's current package version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

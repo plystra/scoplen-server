@@ -9,7 +9,8 @@ Maturity: Exploration. Maintenance: Active. The repository baseline is under dev
 current binary provides role selection, validated TOML and `SPL_` environment configuration,
 first-run deployment material, a single public listener, health/readiness/metrics endpoints, and
 plain or file-based TLS. It now opens a durable SQLite database in WAL mode and applies its first
-forward migration before starting roles; readiness checks that database. PostgreSQL and the
+forward migration for `api`, `worker`, and `edge` roles; readiness checks that database. Standalone
+`ca` and `gateway` roles do not open SQLite or generate Personal setup material. PostgreSQL and the
 remaining storage, audit, identity, sync, control, gateway, and console behavior are still roadmap
 work. ACME TLS-ALPN-01 issuance remains unavailable.
 
@@ -40,8 +41,9 @@ Run `cargo run -p scoplen-server -- --help` for role selection and configuration
 Personal defaults bind to `127.0.0.1:8443` and use a local data directory. A reverse proxy may
 terminate TLS and select `tls.mode = "plain"`; direct TLS uses `tls.mode = "files"` with a PEM
 certificate and key. `tls.mode = "acme"` is reserved until the ACME implementation lands.
-The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run on startup and a
-migration failure stops startup. `storage.backend` currently accepts only `sqlite`.
+The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before database-backed
+roles start, and a migration failure stops startup. These roles currently require
+`storage.backend = "sqlite"`.
 
 ## Security
 

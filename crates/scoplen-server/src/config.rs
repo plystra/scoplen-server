@@ -96,7 +96,7 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns an error when a listener, role, storage, TLS, or ACME value violates a local
+    /// Returns an error when a listener, role, TLS, or ACME value violates a local
     /// deployment invariant.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.server.listen_port == 0 {
@@ -112,11 +112,6 @@ impl Config {
         }
         resolve_roles(&self.roles.names)
             .map_err(|error| ConfigError::Invalid(error.to_string()))?;
-        if self.storage.backend != "sqlite" {
-            return Err(ConfigError::Invalid(
-                "storage.backend must be sqlite; PostgreSQL support is not available yet".into(),
-            ));
-        }
         match self.tls.mode {
             TlsMode::Files => {
                 if self.tls.cert_file.is_none() || self.tls.key_file.is_none() {
@@ -141,6 +136,21 @@ impl Config {
                 }
             }
             TlsMode::Plain => {}
+        }
+        Ok(())
+    }
+
+    /// Validate settings required by the selected roles, including the database backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any selected role cannot run with the configured storage backend.
+    pub fn validate_for_roles(&self, roles: &[crate::Role]) -> Result<(), ConfigError> {
+        self.validate()?;
+        if roles.iter().any(|role| role.requires_store()) && self.storage.backend != "sqlite" {
+            return Err(ConfigError::Invalid(
+                "storage.backend must be sqlite for api, worker, or edge; PostgreSQL support is not available yet".into(),
+            ));
         }
         Ok(())
     }
@@ -311,9 +321,14 @@ mod tests {
     fn unsupported_storage_backends_are_rejected() {
         let mut config = Config::default();
         config.storage.backend = "postgres".into();
-        let error = config.validate().expect_err("PostgreSQL is not implemented");
+        let error = config
+            .validate_for_roles(&[crate::Role::Api])
+            .expect_err("PostgreSQL is not implemented for the API");
         assert!(error.to_string().contains("storage.backend"));
         config.storage.backend = "unknown".into();
-        assert!(config.validate().is_err());
+        assert!(config.validate_for_roles(&[crate::Role::Worker]).is_err());
+        config
+            .validate_for_roles(&[crate::Role::Ca, crate::Role::Gateway])
+            .expect("database-free roles ignore storage backend");
     }
 }

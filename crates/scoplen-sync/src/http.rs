@@ -515,7 +515,8 @@ impl SyncHttpError {
             | storage::SyncStoreError::BatchByteLimit
             | storage::SyncStoreError::InvalidEnvelope
             | storage::SyncStoreError::DuplicateObject
-            | storage::SyncStoreError::InvalidPageSize => {
+            | storage::SyncStoreError::InvalidPageSize
+            | storage::SyncStoreError::InvalidRetentionTime => {
                 Self::invalid(instance, error.to_string())
             }
             storage::SyncStoreError::Constraint(_)

@@ -199,6 +199,27 @@ impl SqliteStore {
             })
     }
 
+    /// Return the kind of one sync vault for service-level authorization checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncStoreError::VaultNotFound` when the vault does not exist or
+    /// `SyncStoreError::Database` when the metadata cannot be read.
+    pub async fn sync_vault_kind(&self, vault_id: VaultId) -> Result<VaultKind, SyncStoreError> {
+        let kind =
+            sqlx::query_scalar::<_, String>("SELECT kind FROM sync_vaults WHERE vault_id = ?")
+                .bind(vault_id.as_slice())
+                .fetch_optional(self.pool())
+                .await?
+                .ok_or(SyncStoreError::VaultNotFound)?;
+        match kind.as_str() {
+            "personal" => Ok(VaultKind::Personal),
+            "shared" => Ok(VaultKind::Shared),
+            "organization" => Ok(VaultKind::Organization),
+            _ => Err(SyncStoreError::CorruptRow("kind")),
+        }
+    }
+
     /// Write one authenticated batch atomically using compare-and-swap bases.
     ///
     /// A write transaction first takes SQLite's write lock by updating the vault counter with a

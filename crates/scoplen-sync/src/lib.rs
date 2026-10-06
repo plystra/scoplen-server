@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Synchronization storage boundary and foundation.
+//! Synchronization storage boundary and HTTP contract adapter.
 //!
-//! The public authenticated HTTP service, policy filtering, and notification endpoints remain
-//! roadmap gate V5 work; this crate currently exposes the storage primitives needed by that
-//! service.
+//! The HTTP adapter implements the K-4 CBOR request/response boundary over the durable SQLite
+//! primitives. Authentication remains an explicit trait boundary: no production authenticator is
+//! provided until the V3 `DPoP` identity implementation exists.
 
 #![forbid(unsafe_code)]
 
@@ -12,6 +12,8 @@ pub use scoplen_store::sync::{
     MAX_PAGE_SIZE, ObjectId, ObjectWrite, SnapshotPage, SyncChange, SyncStoreError, VaultId,
     VaultKind, WriteReceipt,
 };
+
+pub mod http;
 
 /// Sync contract marker.
 pub const COMPONENT: &str = "sync";

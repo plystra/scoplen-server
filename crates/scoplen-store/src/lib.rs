@@ -139,7 +139,7 @@ pub enum StoreError {
     /// The parent directory could not be created.
     #[error("could not create storage directory: {0}")]
     CreateDirectory(std::io::Error),
-    /// The SQLite database could not be opened or queried.
+    /// The relational database could not be opened or queried.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     /// A forward migration could not be applied.

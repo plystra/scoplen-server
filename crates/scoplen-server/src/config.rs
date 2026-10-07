@@ -78,6 +78,11 @@ impl Config {
         if let Some(value) = env_value("SPL_TLS_ACME_EMAIL") {
             self.tls.acme_email = Some(value);
         }
+        if let Some(value) = env_value("SPL_TLS_ACME_PRODUCTION") {
+            self.tls.acme_production = value.parse().map_err(|_| {
+                ConfigError::Invalid("SPL_TLS_ACME_PRODUCTION must be true or false".into())
+            })?;
+        }
         if let Some(value) = env_value("SPL_STORAGE_BACKEND") {
             self.storage.backend = value;
         }
@@ -216,6 +221,12 @@ pub struct TlsSettings {
     pub key_file: Option<PathBuf>,
     /// Contact address for ACME registration.
     pub acme_email: Option<String>,
+    /// Whether ACME requests use the Let's Encrypt production directory.
+    ///
+    /// Set this to `false` when testing against the staging directory. Production is the
+    /// default so a Personal deployment obtains a browser-trusted certificate without an
+    /// additional setting.
+    pub acme_production: bool,
     /// Proxies trusted to supply forwarded client metadata in `plain` mode.
     pub trusted_proxies: Vec<String>,
 }
@@ -227,6 +238,7 @@ impl Default for TlsSettings {
             cert_file: None,
             key_file: None,
             acme_email: None,
+            acme_production: true,
             trusted_proxies: Vec::new(),
         }
     }
@@ -315,6 +327,12 @@ mod tests {
         config.tls.mode = TlsMode::Files;
         let error = config.validate().expect_err("missing files must be rejected");
         assert!(error.to_string().contains("cert_file and tls.key_file"));
+    }
+
+    #[test]
+    fn acme_production_defaults_to_lets_encrypt_production() {
+        let config = Config::default();
+        assert!(config.tls.acme_production);
     }
 
     #[test]

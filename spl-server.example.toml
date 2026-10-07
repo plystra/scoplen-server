@@ -9,6 +9,9 @@ data_dir = "./data"
 [tls]
 # Use "plain" behind a trusted TLS reverse proxy, or "files" for direct TLS.
 mode = "plain"
+# Contact address is required in acme mode. Set production=false for Let's Encrypt staging.
+# acme_email = "operator@example.com"
+# acme_production = true
 trusted_proxies = []
 
 [roles]

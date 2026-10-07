@@ -8,9 +8,10 @@ roles. Standalone `ca` and `gateway` roles do not open SQLite or create Personal
 
 The public listener is one TCP port. In `plain` mode it is intended to sit behind a trusted TLS
 terminator. In `files` mode it terminates TLS itself and advertises `h2`, `http/1.1`, and
-`spl-gw/1` through ALPN. The gateway protocol is reserved for the managed data-path gate and is
-not accepted by the baseline listener yet. `acme` is parsed and validated but deliberately fails
-at startup until TLS-ALPN-01 is implemented.
+`spl-gw/1` through ALPN. In `acme` mode it obtains and renews a certificate through Let's Encrypt
+TLS-ALPN-01, persists the ACME account and certificate cache below the data directory, and uses
+the same ALPN set for application connections. The gateway protocol is reserved for the managed
+data-path gate and is not accepted by the baseline listener yet.
 
 The baseline exposes `/healthz`, `/readyz`, and `/metrics`. Logs are JSON tracing events; secret
 material is written only under the configured data directory and is never included in request

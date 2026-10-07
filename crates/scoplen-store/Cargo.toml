@@ -10,6 +10,8 @@ description = "Scoplen storage abstraction."
 workspace = true
 
 [dependencies]
+bytes.workspace = true
+object_store.workspace = true
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 thiserror.workspace = true
 

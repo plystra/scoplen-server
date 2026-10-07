@@ -4,11 +4,18 @@
 use std::{path::Path, sync::Arc, time::Duration};
 
 use axum::{Router, http::StatusCode, routing::get};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto::Builder,
+    service::TowerToHyperService,
+};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
+use rustls_acme::{AcmeConfig, caches::DirCache};
 use scoplen_store::SqliteStore;
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
 use tracing::{error, info, warn};
 
 use crate::{Config, Role, ServerError, TlsMode};
@@ -212,9 +219,7 @@ async fn run_public_listener(
             }
         }
         TlsMode::Acme => {
-            return Err(ServerError::Tls(
-                "ACME TLS-ALPN provisioning is selected but not enabled in this baseline; use files mode or a TLS-terminating proxy while V1 is in progress".into(),
-            ));
+            run_acme_listener(config, listener, store).await?;
         }
     }
     Ok(())
@@ -250,23 +255,68 @@ fn tls_config(config: &Config) -> Result<ServerConfig, ServerError> {
         .with_no_client_auth()
         .with_single_cert(certificates, key)
         .map_err(|error| ServerError::Tls(error.to_string()))?;
-    server.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"spl-gw/1".to_vec()];
+    server.alpn_protocols = application_alpn_protocols();
     Ok(server)
 }
 
+async fn run_acme_listener(
+    config: Config,
+    listener: TcpListener,
+    store: Arc<SqliteStore>,
+) -> Result<(), ServerError> {
+    let email = config
+        .tls
+        .acme_email
+        .as_deref()
+        .ok_or_else(|| ServerError::Tls("tls.acme_email is required in acme mode".into()))?;
+    let cache_dir = config.server.data_dir.join("acme-cache");
+    let mut tls_incoming = AcmeConfig::new([config.server.public_host.as_str()])
+        .contact_push(acme_contact(email))
+        .cache(DirCache::new(cache_dir))
+        .directory_lets_encrypt(config.tls.acme_production)
+        .tokio_incoming(TcpListenerStream::new(listener), application_alpn_protocols());
+
+    while let Some(result) = tls_incoming.next().await {
+        let tls = result.map_err(ServerError::Runtime)?;
+        let is_gateway = tls
+            .get_ref()
+            .get_ref()
+            .1
+            .alpn_protocol()
+            .is_some_and(|protocol| protocol == b"spl-gw/1");
+        let router = api_router(store.clone());
+        tokio::spawn(async move {
+            if let Err(error) = serve_tls_io(tls, router, is_gateway).await {
+                error!(%error, "ACME TLS connection failed");
+            }
+        });
+    }
+    Ok(())
+}
+
+fn acme_contact(email: &str) -> String {
+    let email = email.trim();
+    if email.starts_with("mailto:") { email.to_owned() } else { format!("mailto:{email}") }
+}
+
+fn application_alpn_protocols() -> Vec<Vec<u8>> {
+    vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"spl-gw/1".to_vec()]
+}
+
 async fn serve_tls_connection(
-    mut stream: TlsStream<tokio::net::TcpStream>,
+    stream: TlsStream<tokio::net::TcpStream>,
     router: Router,
 ) -> Result<(), ServerError> {
-    use hyper_util::{
-        rt::{TokioExecutor, TokioIo},
-        server::conn::auto::Builder,
-        service::TowerToHyperService,
-    };
+    let is_gateway =
+        stream.get_ref().1.alpn_protocol().is_some_and(|protocol| protocol == b"spl-gw/1");
+    serve_tls_io(stream, router, is_gateway).await
+}
 
-    let protocol =
-        stream.get_ref().1.alpn_protocol().map_or_else(|| b"http/1.1".to_vec(), ToOwned::to_owned);
-    if protocol.as_slice() == b"spl-gw/1" {
+async fn serve_tls_io<S>(mut stream: S, router: Router, is_gateway: bool) -> Result<(), ServerError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    if is_gateway {
         stream
             .write_all(b"SPL gateway protocol is reserved for the managed data-path gate.\n")
             .await?;
@@ -340,6 +390,12 @@ mod tests {
         let _ = server.await;
         drop(store);
         remove_test_directory(&data_dir).await;
+    }
+
+    #[test]
+    fn acme_contacts_are_normalized_for_account_registration() {
+        assert_eq!(acme_contact("operator@example.com"), "mailto:operator@example.com");
+        assert_eq!(acme_contact("  mailto:operator@example.com  "), "mailto:operator@example.com");
     }
 
     async fn http_readiness(address: std::net::SocketAddr) -> String {

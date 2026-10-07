@@ -35,7 +35,9 @@ tokio-rustls = "0.26.2"
 toml = "0.8.20"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt", "json"] }
+tokio-stream = { version = "0.1.19", features = ["net"] }
 uuid = { version = "1.16.0", features = ["v4"] }
+rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-lc-rs", "tls12", "tokio", "webpki-roots"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

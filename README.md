@@ -54,7 +54,11 @@ cargo run -p scoplen-server -- --validate-config
 Run `cargo run -p scoplen-server -- --help` for role selection and configuration options. The
 Personal defaults bind to `127.0.0.1:8443` and use a local data directory. A reverse proxy may
 terminate TLS and select `tls.mode = "plain"`; direct TLS uses `tls.mode = "files"` with a PEM
-certificate and key. `tls.mode = "acme"` is reserved until the ACME implementation lands.
+certificate and key. `tls.mode = "acme"` obtains and renews a Let's Encrypt TLS-ALPN-01
+certificate for `server.public_host`, using the contact in `tls.acme_email`. ACME account keys and
+certificates are cached below `server.data_dir/acme-cache`; keep the data directory in protected
+operator storage. The `tls.acme_production` setting defaults to `true`; set it to `false` only when
+testing against the Let's Encrypt staging directory.
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before database-backed
 roles start, and a migration failure stops startup. These roles currently require
 `storage.backend = "sqlite"`.

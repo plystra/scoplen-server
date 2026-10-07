@@ -5,14 +5,14 @@ Scoplen is a Plystra project. This repository is licensed under AGPL-3.0-only.
 
 ## Status
 
-Maturity: Exploration. Maintenance: Active. The repository baseline is under development. The
+Maturity: Exploration. Maintenance: Active. The repository baseline (roadmap V1) is complete. The
 current binary provides role selection, validated TOML and `SPL_` environment configuration,
 first-run deployment material, a single public listener, health/readiness/metrics endpoints, and
-plain or file-based TLS. It now opens a durable SQLite database in WAL mode and applies forward
-migrations for `api`, `worker`, and `edge` roles; readiness checks that database. The storage layer
-also has the first sync foundation: per-vault gap-free sequence allocation, atomic compare-and-swap
-batches, current change and snapshot paging, acknowledgement cursors, and bounded version reads. It
-also exposes an atomic retention pass for the worker: historical rows are bounded to the current
+plain, file-based, or ACME TLS. It now opens a durable SQLite database in WAL mode and applies
+forward migrations for `api`, `worker`, and `edge` roles; readiness checks that database. The
+storage layer also has the first sync foundation: per-vault gap-free sequence allocation, atomic
+compare-and-swap batches, current change and snapshot paging, acknowledgement cursors, and
+bounded version reads. It also exposes an atomic retention pass for the worker: historical rows are
 version plus 20 retained versions, and acknowledged or expired tombstones advance the purge
 horizon while deleting their retained history. The `scoplen-store` queue now persists opaque jobs
 with bounded payloads, atomic claims, owner-checked leases, retry/failure state, and expired-lease

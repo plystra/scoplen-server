@@ -16,7 +16,8 @@ self-hosted server, host agent, administration CLI, and web console.
 
 ## Open gaps
 
-- ACME TLS-ALPN-01 issuance and renewal are not implemented.
+- ACME TLS-ALPN-01 issuance and renewal are integrated; live CA issuance and renewal have not been
+  verified against an external authority.
 - SQLite migration, transaction, initial sync storage, an atomic retention primitive, a durable
   leased job queue with worker lease cleanup, and an explicitly authenticated K-4 HTTP/CBOR adapter
   exist. The baseline listener does not mount the adapter until production identity is available.

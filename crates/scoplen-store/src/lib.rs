@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 pub mod account_keys;
+pub mod object_storage;
 pub mod sync;
 
 use std::{path::Path, time::Duration};

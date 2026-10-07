@@ -33,6 +33,9 @@ account-key, object-sync, and local notification boundaries but still delegates 
 signature verification, membership, and policy decisions to the service. Notification events are
 encoded by `scoplen-api` and delivered only to authenticated device subscriptions through a
 process-local broadcast hub; PostgreSQL `LISTEN`/`NOTIFY` fan-out and event publication from the
-identity and vault services remain open. Policy filtering, version retention and tombstone purge
-workers, PostgreSQL, parallel migration equivalence, application-level column encryption, object
-storage, audit, and other worker jobs remain roadmap work.
+identity and vault services remain open. `scoplen-store` also exposes a backend-neutral object
+storage boundary for local filesystem and S3-compatible stores, with validated keys and streaming
+or multipart access; server configuration and role integration are not mounted yet. Policy
+filtering, version retention and tombstone purge workers, PostgreSQL, parallel migration
+equivalence, application-level column encryption, audit, and other worker jobs remain roadmap
+work.

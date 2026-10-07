@@ -23,10 +23,12 @@ applies an injected device policy, and fans out deterministic CBOR events throug
 local hub. It requires an injected authenticator that binds DPoP proofs to the request method and
 URI, authorizes vault, account-key, and notification operations, validates account-key signatures
 and active-device wraps, and validates encrypted envelopes before storage; the baseline listener
-does not mount this router. PostgreSQL, object storage, production identity/authentication, policy
-filtering, retention scheduling and membership-aware purge orchestration, multi-instance
-notification fan-out, audit, control, gateway, and console behavior are still roadmap work.
-ACME TLS-ALPN-01 issuance remains unavailable.
+does not mount this router. The `scoplen-store` crate now provides a backend-neutral object
+storage boundary with local filesystem and S3-compatible implementations, including bounded key
+validation and streaming/multipart operations; runtime configuration and role wiring remain
+roadmap work. PostgreSQL, production identity/authentication, policy filtering, retention
+scheduling and membership-aware purge orchestration, multi-instance notification fan-out, audit,
+control, gateway, and console behavior are still roadmap work.
 
 ## Repository shape
 

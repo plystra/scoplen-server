@@ -11,6 +11,7 @@
 use std::{fmt, path::PathBuf, sync::Arc};
 
 use bytes::Bytes;
+use futures_util::StreamExt;
 use object_store::{
     GetResult, MultipartUpload, ObjectStore, ObjectStoreExt, PutResult,
     aws::AmazonS3Builder,
@@ -26,6 +27,7 @@ pub const MAX_OBJECT_KEY_BYTES: usize = 1024;
 #[derive(Clone)]
 pub struct ObjectStorage {
     backend: Arc<dyn ObjectStore>,
+    filesystem_root: Option<PathBuf>,
 }
 
 impl fmt::Debug for ObjectStorage {
@@ -101,22 +103,26 @@ impl ObjectStorage {
     /// Returns an error when a filesystem root cannot be initialized, S3 settings are incomplete,
     /// or the selected backend rejects its configuration.
     pub fn from_config(config: &ObjectStorageConfig) -> Result<Self, ObjectStorageError> {
-        let backend: Arc<dyn ObjectStore> = match config {
+        let (backend, filesystem_root): (Arc<dyn ObjectStore>, Option<PathBuf>) = match config {
             ObjectStorageConfig::Filesystem { root } => {
                 std::fs::create_dir_all(root).map_err(ObjectStorageError::CreateDirectory)?;
-                Arc::new(
-                    LocalFileSystem::new_with_prefix(root).map_err(ObjectStorageError::Backend)?,
+                (
+                    Arc::new(
+                        LocalFileSystem::new_with_prefix(root)
+                            .map_err(ObjectStorageError::Backend)?,
+                    ),
+                    Some(root.clone()),
                 )
             }
-            ObjectStorageConfig::S3(config) => Arc::new(build_s3(config)?),
+            ObjectStorageConfig::S3(config) => (Arc::new(build_s3(config)?), None),
         };
-        Ok(Self { backend })
+        Ok(Self { backend, filesystem_root })
     }
 
     /// Wrap an already constructed object-store backend.
     #[must_use]
     pub fn from_backend(backend: Arc<dyn ObjectStore>) -> Self {
-        Self { backend }
+        Self { backend, filesystem_root: None }
     }
 
     /// Save an object atomically at `key`.
@@ -186,6 +192,28 @@ impl ObjectStorage {
     pub async fn delete(&self, key: &str) -> Result<(), ObjectStorageError> {
         let path = object_path(key)?;
         self.backend.delete(&path).await.map_err(ObjectStorageError::Backend)
+    }
+
+    /// Check backend reachability without creating or deleting an object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the backend cannot enumerate its root prefix.
+    pub async fn check(&self) -> Result<(), ObjectStorageError> {
+        if let Some(root) = &self.filesystem_root {
+            let metadata =
+                std::fs::metadata(root).map_err(ObjectStorageError::FilesystemUnavailable)?;
+            if !metadata.is_dir() {
+                return Err(ObjectStorageError::InvalidConfiguration(
+                    "filesystem object storage root is not a directory".into(),
+                ));
+            }
+        }
+        let mut objects = self.backend.list(None);
+        if let Some(result) = objects.next().await {
+            result.map_err(ObjectStorageError::Backend)?;
+        }
+        Ok(())
     }
 }
 
@@ -258,6 +286,9 @@ pub enum ObjectStorageError {
     /// The filesystem root could not be created.
     #[error("could not create object storage directory: {0}")]
     CreateDirectory(std::io::Error),
+    /// The configured filesystem root disappeared or became inaccessible.
+    #[error("object storage filesystem root is unavailable: {0}")]
+    FilesystemUnavailable(#[source] std::io::Error),
     /// The selected backend rejected an operation or could not complete it.
     #[error("object storage backend error: {0}")]
     Backend(#[source] object_store::Error),
@@ -335,6 +366,17 @@ mod tests {
             store.put_multipart("../outside").await,
             Err(ObjectStorageError::InvalidKey(_))
         ));
+        fs::remove_dir_all(root).expect("temporary object store is removable");
+    }
+
+    #[tokio::test]
+    async fn filesystem_health_check_succeeds_without_mutating_objects() {
+        let root = temporary_directory();
+        let store =
+            ObjectStorage::from_config(&ObjectStorageConfig::Filesystem { root: root.clone() })
+                .expect("filesystem backend builds");
+        store.check().await.expect("filesystem backend is reachable");
+        store.check().await.expect("second health check");
         fs::remove_dir_all(root).expect("temporary object store is removable");
     }
 

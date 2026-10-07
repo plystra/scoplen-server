@@ -8,7 +8,9 @@ mod error;
 mod roles;
 mod runtime;
 
-pub use config::{Config, ConfigError, TlsMode};
+pub use config::{
+    Config, ConfigError, ObjectStorageSettings, SecretValue, StorageSettings, TlsMode,
+};
 pub use error::ServerError;
 pub use roles::{Role, RoleError, resolve_roles};
 pub use runtime::{BootstrapResult, PreparedRoles, bootstrap, prepare_roles, run_roles};

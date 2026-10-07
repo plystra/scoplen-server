@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Deployment configuration and validation.
 
-use std::{net::IpAddr, path::PathBuf};
+use std::{
+    fmt,
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
 
+use scoplen_store::{ObjectStorageConfig, S3ObjectStorageConfig};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -86,6 +91,34 @@ impl Config {
         if let Some(value) = env_value("SPL_STORAGE_BACKEND") {
             self.storage.backend = value;
         }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_BACKEND") {
+            self.storage.object.backend = value;
+        }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_DIRECTORY") {
+            self.storage.object.directory = Some(PathBuf::from(value));
+        }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_S3_BUCKET") {
+            self.storage.object.s3_bucket = Some(value);
+        }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_S3_REGION") {
+            self.storage.object.s3_region = value;
+        }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_S3_ENDPOINT") {
+            self.storage.object.s3_endpoint = Some(value);
+        }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_S3_ACCESS_KEY_ID") {
+            self.storage.object.s3_access_key_id = Some(SecretValue(value));
+        }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_S3_SECRET_ACCESS_KEY") {
+            self.storage.object.s3_secret_access_key = Some(SecretValue(value));
+        }
+        if let Some(value) = env_value("SPL_STORAGE_OBJECT_S3_ALLOW_HTTP") {
+            self.storage.object.s3_allow_http = value.parse().map_err(|_| {
+                ConfigError::Invalid(
+                    "SPL_STORAGE_OBJECT_S3_ALLOW_HTTP must be true or false".into(),
+                )
+            })?;
+        }
         if let Some(value) = env_value("SPL_ROLES_NAMES") {
             self.roles.names = value
                 .split(',')
@@ -142,6 +175,7 @@ impl Config {
             }
             TlsMode::Plain => {}
         }
+        self.storage.object.validate()?;
         Ok(())
     }
 
@@ -275,13 +309,153 @@ impl Default for RoleSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct StorageSettings {
-    /// `sqlite` is the Personal and Team default; PostgreSQL is reserved for V2.
+    /// `sqlite` is the Personal and Team default; PostgreSQL remains a later storage profile.
     pub backend: String,
+    /// Object storage backend used by recordings, exports, large envelopes, and backups.
+    pub object: ObjectStorageSettings,
 }
 
 impl Default for StorageSettings {
     fn default() -> Self {
-        Self { backend: "sqlite".into() }
+        Self { backend: "sqlite".into(), object: ObjectStorageSettings::default() }
+    }
+}
+
+impl StorageSettings {
+    /// Resolve object storage settings against the deployment data directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when object storage settings are invalid.
+    pub fn object_storage_config(
+        &self,
+        data_dir: &Path,
+    ) -> Result<ObjectStorageConfig, ConfigError> {
+        self.object.validate()?;
+        match self.object.backend.trim().to_ascii_lowercase().as_str() {
+            "filesystem" => Ok(ObjectStorageConfig::Filesystem {
+                root: self.object.directory.clone().unwrap_or_else(|| data_dir.join("objects")),
+            }),
+            "s3" => Ok(ObjectStorageConfig::S3(S3ObjectStorageConfig {
+                bucket: self.object.s3_bucket.clone().unwrap_or_default(),
+                region: self.object.s3_region.clone(),
+                endpoint: self.object.s3_endpoint.clone(),
+                access_key_id: self.object.s3_access_key_id.as_ref().map(SecretValue::expose),
+                secret_access_key: self
+                    .object
+                    .s3_secret_access_key
+                    .as_ref()
+                    .map(SecretValue::expose),
+                allow_http: self.object.s3_allow_http,
+            })),
+            backend => Err(ConfigError::Invalid(format!(
+                "storage.object.backend must be filesystem or s3, got {backend:?}"
+            ))),
+        }
+    }
+}
+
+/// Redacted string used for static object-storage credentials.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct SecretValue(String);
+
+impl SecretValue {
+    fn expose(&self) -> String {
+        self.0.clone()
+    }
+}
+
+impl fmt::Debug for SecretValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("<redacted>")
+    }
+}
+
+/// Object storage settings selected independently from the relational backend.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ObjectStorageSettings {
+    /// `filesystem` stores objects below `storage.object.directory` or `data_dir/objects`.
+    pub backend: String,
+    /// Local root directory for the filesystem backend.
+    pub directory: Option<PathBuf>,
+    /// S3-compatible bucket name.
+    pub s3_bucket: Option<String>,
+    /// S3 signing region.
+    pub s3_region: String,
+    /// Optional S3-compatible endpoint.
+    pub s3_endpoint: Option<String>,
+    /// Optional static S3 access key.
+    pub s3_access_key_id: Option<SecretValue>,
+    /// Optional static S3 secret key.
+    pub s3_secret_access_key: Option<SecretValue>,
+    /// Permit HTTP S3 endpoints for local emulators.
+    pub s3_allow_http: bool,
+}
+
+impl Default for ObjectStorageSettings {
+    fn default() -> Self {
+        Self {
+            backend: "filesystem".into(),
+            directory: None,
+            s3_bucket: None,
+            s3_region: "us-east-1".into(),
+            s3_endpoint: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_allow_http: false,
+        }
+    }
+}
+
+impl ObjectStorageSettings {
+    fn validate(&self) -> Result<(), ConfigError> {
+        match self.backend.trim().to_ascii_lowercase().as_str() {
+            "filesystem" => {
+                if self.directory.as_ref().is_some_and(|directory| directory.as_os_str().is_empty())
+                {
+                    return Err(ConfigError::Invalid(
+                        "storage.object.directory must not be empty".into(),
+                    ));
+                }
+            }
+            "s3" => {
+                if self.s3_bucket.as_deref().unwrap_or_default().trim().is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "storage.object.s3_bucket is required for the s3 backend".into(),
+                    ));
+                }
+                if self.s3_region.trim().is_empty() {
+                    return Err(ConfigError::Invalid(
+                        "storage.object.s3_region must not be empty".into(),
+                    ));
+                }
+                if self.s3_access_key_id.is_some() != self.s3_secret_access_key.is_some() {
+                    return Err(ConfigError::Invalid(
+                        "storage.object.s3_access_key_id and storage.object.s3_secret_access_key must be supplied together".into(),
+                    ));
+                }
+                if self.s3_access_key_id.as_ref().is_some_and(|value| value.0.is_empty())
+                    || self.s3_secret_access_key.as_ref().is_some_and(|value| value.0.is_empty())
+                {
+                    return Err(ConfigError::Invalid(
+                        "storage.object S3 static credentials must not be empty".into(),
+                    ));
+                }
+                if self.s3_endpoint.as_deref().is_some_and(|endpoint| endpoint.trim().is_empty()) {
+                    return Err(ConfigError::Invalid(
+                        "storage.object.s3_endpoint must not be empty when configured".into(),
+                    ));
+                }
+            }
+            backend => {
+                return Err(ConfigError::Invalid(format!(
+                    "storage.object.backend must be filesystem or s3, got {backend:?}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -348,5 +522,46 @@ mod tests {
         config
             .validate_for_roles(&[crate::Role::Ca, crate::Role::Gateway])
             .expect("database-free roles ignore storage backend");
+    }
+
+    #[test]
+    fn default_object_storage_uses_a_private_data_subdirectory() {
+        let config = Config::default();
+        let data_dir = PathBuf::from("/var/lib/scoplen");
+        let object = config
+            .storage
+            .object_storage_config(&data_dir)
+            .expect("default filesystem object storage is valid");
+        assert!(matches!(
+            object,
+            scoplen_store::ObjectStorageConfig::Filesystem { root }
+                if root == data_dir.join("objects")
+        ));
+    }
+
+    #[test]
+    fn s3_object_storage_configuration_is_validated_and_redacted() {
+        let mut config = Config::default();
+        config.storage.object.backend = "s3".into();
+        config.storage.object.s3_bucket = Some("scoplen-test".into());
+        config.storage.object.s3_access_key_id = Some(SecretValue("visible-id".into()));
+        config.storage.object.s3_secret_access_key = Some(SecretValue("visible-secret".into()));
+        config.storage.object.s3_endpoint = Some("http://127.0.0.1:9000".into());
+        config.storage.object.s3_allow_http = true;
+        config.validate().expect("complete S3 configuration is valid");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("visible-id"));
+        assert!(!debug.contains("visible-secret"));
+
+        config.storage.object.s3_secret_access_key = None;
+        assert!(config.validate().is_err(), "partial S3 credentials must fail closed");
+    }
+
+    #[test]
+    fn unknown_object_storage_backend_is_rejected() {
+        let mut config = Config::default();
+        config.storage.object.backend = "unknown".into();
+        let error = config.validate().expect_err("unknown object backend must fail");
+        assert!(error.to_string().contains("storage.object.backend"));
     }
 }

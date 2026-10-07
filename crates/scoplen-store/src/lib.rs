@@ -7,6 +7,10 @@ pub mod account_keys;
 pub mod object_storage;
 pub mod sync;
 
+pub use object_storage::{
+    ObjectStorage, ObjectStorageConfig, ObjectStorageError, S3ObjectStorageConfig,
+};
+
 use std::{path::Path, time::Duration};
 
 use sqlx::{

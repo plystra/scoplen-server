@@ -35,7 +35,8 @@ encoded by `scoplen-api` and delivered only to authenticated device subscription
 process-local broadcast hub; PostgreSQL `LISTEN`/`NOTIFY` fan-out and event publication from the
 identity and vault services remain open. `scoplen-store` also exposes a backend-neutral object
 storage boundary for local filesystem and S3-compatible stores, with validated keys and streaming
-or multipart access; server configuration and role integration are not mounted yet. Policy
+or multipart access. Database-backed roles initialize the configured object backend at startup and
+`/readyz` checks its reachability alongside the relational database. Policy
 filtering, version retention and tombstone purge workers, PostgreSQL, parallel migration
 equivalence, application-level column encryption, audit, and other worker jobs remain roadmap
 work.

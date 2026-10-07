@@ -2425,6 +2425,7 @@ name = "scoplen-store"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-util",
  "object_store",
  "sqlx",
  "thiserror 2.0.21",

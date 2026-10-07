@@ -63,7 +63,11 @@ operator storage. The `tls.acme_production` setting defaults to `true`; set it t
 testing against the Let's Encrypt staging directory.
 The SQLite database is `scoplen.sqlite` in `server.data_dir`; migrations run before database-backed
 roles start, and a migration failure stops startup. These roles currently require
-`storage.backend = "sqlite"`.
+`storage.backend = "sqlite"`. Object storage is initialized alongside the database for those
+roles. The default `storage.object.backend = "filesystem"` stores below
+`server.data_dir/objects`; an S3-compatible backend can be selected with the nested S3 settings
+in `spl-server.example.toml` or their `SPL_STORAGE_OBJECT_*` environment overrides. `/readyz`
+checks both the database and the configured object-storage backend.
 
 ## Security
 

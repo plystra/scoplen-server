@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! First-run material and role supervision.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use axum::{Router, http::StatusCode, routing::get};
 use hyper_util::{
@@ -148,7 +152,8 @@ pub async fn run_roles(
         )));
     }
     if roles.contains(&Role::Worker) {
-        tasks.push(tokio::spawn(run_periodic_role("worker")));
+        let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
+        tasks.push(tokio::spawn(run_worker_role(store)));
     }
     if roles.contains(&Role::Ca) {
         tasks.push(tokio::spawn(run_periodic_role("ca")));
@@ -170,6 +175,31 @@ async fn run_periodic_role(name: &'static str) -> Result<(), ServerError> {
         info!(role = name, "role heartbeat");
         sleep(Duration::from_secs(30)).await;
     }
+}
+
+const WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+async fn run_worker_role(store: Arc<SqliteStore>) -> Result<(), ServerError> {
+    let mut interval = tokio::time::interval(WORKER_HEARTBEAT_INTERVAL);
+    loop {
+        interval.tick().await;
+        match worker_heartbeat(&store).await {
+            Ok(requeued) => {
+                info!(role = "worker", requeued_expired_jobs = requeued, "worker heartbeat");
+            }
+            Err(error) => error!(%error, role = "worker", "worker heartbeat failed"),
+        }
+    }
+}
+
+async fn worker_heartbeat(store: &SqliteStore) -> Result<u64, ServerError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| ServerError::Task(format!("worker clock is before Unix epoch: {error}")))?
+        .as_millis()
+        .try_into()
+        .map_err(|_| ServerError::Task("worker clock exceeds SQLite timestamp range".into()))?;
+    store.requeue_expired_jobs(now).await.map_err(|error| ServerError::Task(error.to_string()))
 }
 
 fn api_router(store: Arc<SqliteStore>, object_storage: Arc<ObjectStorage>) -> Router {
@@ -473,6 +503,44 @@ mod tests {
         assert!(prepared.object_storage.is_some());
         assert!(data_dir.join("objects").is_dir());
         drop(prepared);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
+    async fn worker_heartbeat_requeues_expired_jobs() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-worker-{}", uuid::Uuid::new_v4()));
+        let store = SqliteStore::open(&data_dir.join("scoplen.sqlite"))
+            .await
+            .expect("open worker database");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_millis()
+            .try_into()
+            .expect("current timestamp fits SQLite integer");
+        let job_id = [42_u8; 16];
+        store
+            .enqueue_job(job_id, "sync-retention", &[], now - 1_000)
+            .await
+            .expect("enqueue expired worker job");
+        store
+            .claim_job("worker-a", now - 1_000, 1)
+            .await
+            .expect("claim worker job")
+            .expect("job is available");
+
+        assert_eq!(worker_heartbeat(&store).await.expect("heartbeat succeeds"), 1);
+        let reclaimed = store
+            .claim_job("worker-b", now, 1_000)
+            .await
+            .expect("claim requeued job")
+            .expect("requeued job is available");
+        assert_eq!(reclaimed.id, job_id);
+        assert_eq!(reclaimed.lease_owner.as_deref(), Some("worker-b"));
+
+        store.pool().close().await;
+        drop(store);
         remove_test_directory(&data_dir).await;
     }
 

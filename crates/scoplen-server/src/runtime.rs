@@ -12,7 +12,7 @@ use hyper_util::{
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use rustls::{ServerConfig, pki_types::PrivateKeyDer};
 use rustls_acme::{AcmeConfig, caches::DirCache};
-use scoplen_store::SqliteStore;
+use scoplen_store::{ObjectStorage, SqliteStore};
 use tokio::{io::AsyncWriteExt, net::TcpListener, time::sleep};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
 use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
@@ -31,6 +31,8 @@ pub struct BootstrapResult {
 pub struct PreparedRoles {
     /// Database pool for roles that need relational storage.
     pub store: Option<SqliteStore>,
+    /// Object storage backend for roles that need relational storage.
+    pub object_storage: Option<ObjectStorage>,
     /// First-run setup link only for roles that initialize the deployment.
     pub setup_link: Option<String>,
 }
@@ -103,11 +105,17 @@ fn hex_bytes(bytes: &[u8]) -> String {
 pub async fn prepare_roles(config: &Config, roles: &[Role]) -> Result<PreparedRoles, ServerError> {
     config.validate_for_roles(roles)?;
     if !roles.iter().any(|role| role.requires_store()) {
-        return Ok(PreparedRoles { store: None, setup_link: None });
+        return Ok(PreparedRoles { store: None, object_storage: None, setup_link: None });
     }
     let store = SqliteStore::open(&config.server.data_dir.join("scoplen.sqlite")).await?;
+    let object_config = config.storage.object_storage_config(&config.server.data_dir)?;
+    let object_storage = ObjectStorage::from_config(&object_config)?;
     let bootstrap = bootstrap(config)?;
-    Ok(PreparedRoles { store: Some(store), setup_link: bootstrap.setup_link })
+    Ok(PreparedRoles {
+        store: Some(store),
+        object_storage: Some(object_storage),
+        setup_link: bootstrap.setup_link,
+    })
 }
 
 /// Run the requested roles until Ctrl-C using role-specific startup resources.
@@ -119,15 +127,25 @@ pub async fn run_roles(
     config: Config,
     roles: Vec<Role>,
     store: Option<SqliteStore>,
+    object_storage: Option<ObjectStorage>,
 ) -> Result<(), ServerError> {
-    if roles.iter().any(|role| role.requires_store()) && store.is_none() {
+    if roles.iter().any(|role| role.requires_store())
+        && (store.is_none() || object_storage.is_none())
+    {
         return Err(ServerError::MissingStore);
     }
     let store = store.map(Arc::new);
+    let object_storage = object_storage.map(Arc::new);
     let mut tasks = Vec::new();
     if roles.contains(&Role::Api) || roles.contains(&Role::Edge) {
         let store = store.as_ref().ok_or(ServerError::MissingStore)?.clone();
-        tasks.push(tokio::spawn(run_public_listener(config.clone(), roles.clone(), store)));
+        let object_storage = object_storage.as_ref().ok_or(ServerError::MissingStore)?.clone();
+        tasks.push(tokio::spawn(run_public_listener(
+            config.clone(),
+            roles.clone(),
+            store,
+            object_storage,
+        )));
     }
     if roles.contains(&Role::Worker) {
         tasks.push(tokio::spawn(run_periodic_role("worker")));
@@ -154,19 +172,24 @@ async fn run_periodic_role(name: &'static str) -> Result<(), ServerError> {
     }
 }
 
-fn api_router(store: Arc<SqliteStore>) -> Router {
+fn api_router(store: Arc<SqliteStore>, object_storage: Arc<ObjectStorage>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route(
             "/readyz",
             get(move || {
                 let store = store.clone();
+                let object_storage = object_storage.clone();
                 async move {
-                    match store.ping().await {
-                        Ok(()) => (StatusCode::OK, "ready"),
-                        Err(error) => {
+                    match (store.ping().await, object_storage.check().await) {
+                        (Ok(()), Ok(())) => (StatusCode::OK, "ready"),
+                        (Err(error), _) => {
                             error!(%error, "readiness database query failed");
                             (StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+                        }
+                        (_, Err(error)) => {
+                            error!(%error, "readiness object storage check failed");
+                            (StatusCode::SERVICE_UNAVAILABLE, "object storage unavailable")
                         }
                     }
                 }
@@ -185,6 +208,7 @@ async fn run_public_listener(
     config: Config,
     roles: Vec<Role>,
     store: Arc<SqliteStore>,
+    object_storage: Arc<ObjectStorage>,
 ) -> Result<(), ServerError> {
     let address = config.listen_address();
     let listener = TcpListener::bind(&address).await?;
@@ -196,7 +220,7 @@ async fn run_public_listener(
                     "edge role is configured behind plain HTTP; gateway ALPN requires direct TLS"
                 );
             }
-            axum::serve(listener, api_router(store))
+            axum::serve(listener, api_router(store, object_storage))
                 .await
                 .map_err(|error| ServerError::Task(error.to_string()))?;
         }
@@ -205,7 +229,7 @@ async fn run_public_listener(
             loop {
                 let (stream, peer) = listener.accept().await?;
                 let acceptor = acceptor.clone();
-                let router = api_router(store.clone());
+                let router = api_router(store.clone(), object_storage.clone());
                 tokio::spawn(async move {
                     match acceptor.accept(stream).await {
                         Ok(tls) => {
@@ -219,7 +243,7 @@ async fn run_public_listener(
             }
         }
         TlsMode::Acme => {
-            run_acme_listener(config, listener, store).await?;
+            run_acme_listener(config, listener, store, object_storage).await?;
         }
     }
     Ok(())
@@ -263,6 +287,7 @@ async fn run_acme_listener(
     config: Config,
     listener: TcpListener,
     store: Arc<SqliteStore>,
+    object_storage: Arc<ObjectStorage>,
 ) -> Result<(), ServerError> {
     let email = config
         .tls
@@ -284,7 +309,7 @@ async fn run_acme_listener(
             .1
             .alpn_protocol()
             .is_some_and(|protocol| protocol == b"spl-gw/1");
-        let router = api_router(store.clone());
+        let router = api_router(store.clone(), object_storage.clone());
         tokio::spawn(async move {
             if let Err(error) = serve_tls_io(tls, router, is_gateway).await {
                 error!(%error, "ACME TLS connection failed");
@@ -374,15 +399,31 @@ mod tests {
         let data_dir = std::env::temp_dir().join(format!("scoplen-ready-{}", uuid::Uuid::new_v4()));
         let store =
             SqliteStore::open(&data_dir.join("scoplen.sqlite")).await.expect("open database");
+        let object_root = data_dir.join("objects");
+        let object_storage =
+            ObjectStorage::from_config(&scoplen_store::ObjectStorageConfig::Filesystem {
+                root: object_root.clone(),
+            })
+            .expect("open object storage");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind isolated HTTP listener");
         let address = listener.local_addr().expect("read listener address");
         let server_store = store.clone();
+        let server_object_storage = object_storage.clone();
         let server = tokio::spawn(async move {
-            axum::serve(listener, api_router(Arc::new(server_store)))
-                .await
-                .expect("serve readiness endpoint");
+            axum::serve(
+                listener,
+                api_router(Arc::new(server_store), Arc::new(server_object_storage)),
+            )
+            .await
+            .expect("serve readiness endpoint");
         });
         assert!(http_readiness(address).await.starts_with("HTTP/1.1 200 OK"));
+
+        fs::remove_dir_all(&object_root).expect("remove object root for readiness failure");
+        assert!(
+            http_readiness(address).await.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "object storage failure must make readiness fail"
+        );
 
         store.pool().close().await;
         assert!(http_readiness(address).await.starts_with("HTTP/1.1 503 Service Unavailable"));
@@ -422,6 +463,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_roles_initializes_configured_object_storage() {
+        let data_dir =
+            std::env::temp_dir().join(format!("scoplen-object-runtime-{}", uuid::Uuid::new_v4()));
+        let mut config = Config::default();
+        config.server.data_dir = data_dir.clone();
+        let prepared = prepare_roles(&config, &[Role::Worker]).await.expect("prepare worker");
+        assert!(prepared.store.is_some());
+        assert!(prepared.object_storage.is_some());
+        assert!(data_dir.join("objects").is_dir());
+        drop(prepared);
+        remove_test_directory(&data_dir).await;
+    }
+
+    #[tokio::test]
     async fn standalone_ca_and_gateway_do_not_open_sqlite_or_generate_setup_material() {
         let data_dir = std::env::temp_dir().join(format!("scoplen-role-{}", uuid::Uuid::new_v4()));
         fs::write(&data_dir, "occupied").expect("create file where a database cannot be opened");
@@ -449,7 +504,7 @@ mod tests {
             let result = prepare_roles(&config, &[role]).await;
             assert!(matches!(result, Err(ServerError::Storage(_))), "{role} must open SQLite");
         }
-        let result = run_roles(config, vec![Role::Api], None).await;
+        let result = run_roles(config, vec![Role::Api], None, None).await;
         assert!(matches!(result, Err(ServerError::MissingStore)));
         fs::remove_file(data_dir).expect("test file is removable");
     }

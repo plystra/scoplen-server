@@ -20,3 +20,15 @@ names = ["all"]
 [storage]
 # SQLite is required by api, worker, and edge. The file is data_dir/scoplen.sqlite.
 backend = "sqlite"
+
+[storage.object]
+# Object storage is initialized for database-backed roles. The filesystem default stores below
+# data_dir/objects; use "s3" for an S3-compatible bucket.
+backend = "filesystem"
+# directory = "./data/objects"
+# s3_bucket = "scoplen-production"
+# s3_region = "us-east-1"
+# s3_endpoint = "https://s3.example.com"
+# s3_access_key_id = "set through an environment or secret reference"
+# s3_secret_access_key = "set through an environment or secret reference"
+# s3_allow_http = false

@@ -14,6 +14,9 @@ pub enum ServerError {
     /// Persistent storage could not be initialized.
     #[error("storage error: {0}")]
     Storage(#[from] scoplen_store::StoreError),
+    /// Object storage could not be initialized or reached.
+    #[error("object storage error: {0}")]
+    ObjectStorage(#[from] scoplen_store::ObjectStorageError),
     /// A database-backed role was started without initialized storage.
     #[error("api, worker, and edge roles require initialized storage")]
     MissingStore,

@@ -2353,7 +2353,6 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-api"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=cc549fd#cc549fddd9507a1e6c6a4c277a79cfbb049b5af8"
 dependencies = [
  "scoplen-model",
  "serde",
@@ -2389,7 +2388,6 @@ version = "0.1.0"
 [[package]]
 name = "scoplen-model"
 version = "0.1.0"
-source = "git+https://github.com/plystra/scoplen-proto.git?rev=cc549fd#cc549fddd9507a1e6c6a4c277a79cfbb049b5af8"
 dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",

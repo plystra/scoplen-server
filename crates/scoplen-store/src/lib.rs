@@ -4,9 +4,11 @@
 #![forbid(unsafe_code)]
 
 pub mod account_keys;
+pub mod jobs;
 pub mod object_storage;
 pub mod sync;
 
+pub use jobs::{Job, JobId, JobQueueError};
 pub use object_storage::{
     ObjectStorage, ObjectStorageConfig, ObjectStorageError, S3ObjectStorageConfig,
 };

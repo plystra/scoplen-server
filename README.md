@@ -14,7 +14,9 @@ also has the first sync foundation: per-vault gap-free sequence allocation, atom
 batches, current change and snapshot paging, acknowledgement cursors, and bounded version reads. It
 also exposes an atomic retention pass for the worker: historical rows are bounded to the current
 version plus 20 retained versions, and acknowledged or expired tombstones advance the purge
-horizon while deleting their retained history.
+horizon while deleting their retained history. The `scoplen-store` queue now persists opaque jobs
+with bounded payloads, atomic claims, owner-checked leases, retry/failure state, and expired-lease
+requeue; the `worker` role runs a 30-second heartbeat that requeues abandoned leases.
 Standalone `ca` and `gateway` roles do not open SQLite or generate Personal setup material.
 The `scoplen-sync` crate now exposes a K-4 HTTP/CBOR router for account key bundles, changes,
 snapshots, version reads, object writes, acknowledgements, and the authenticated
@@ -25,10 +27,10 @@ URI, authorizes vault, account-key, and notification operations, validates accou
 and active-device wraps, and validates encrypted envelopes before storage; the baseline listener
 does not mount this router. The `scoplen-store` crate now provides a backend-neutral object
 storage boundary with local filesystem and S3-compatible implementations, including bounded key
-validation and streaming/multipart operations; runtime configuration and role wiring remain
-roadmap work. PostgreSQL, production identity/authentication, policy filtering, retention
-scheduling and membership-aware purge orchestration, multi-instance notification fan-out, audit,
-control, gateway, and console behavior are still roadmap work.
+validation and streaming/multipart operations; database-backed roles initialize the configured
+backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
+filtering, retention job scheduling and membership-aware purge orchestration, multi-instance
+notification fan-out, audit, control, gateway, and console behavior are still roadmap work.
 
 ## Repository shape
 

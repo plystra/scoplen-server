@@ -31,6 +31,9 @@ validation and streaming/multipart operations; database-backed roles initialize 
 backend and include it in `/readyz`. PostgreSQL, production identity/authentication, policy
 filtering, retention job scheduling and membership-aware purge orchestration, multi-instance
 notification fan-out, audit, control, gateway, and console behavior are still roadmap work.
+The storage crate also carries a parallel PostgreSQL migration set and a logical schema check
+against the SQLite set. The server roles remain SQLite-only until their storage queries and
+readiness wiring are implemented for PostgreSQL.
 
 ## Repository shape
 

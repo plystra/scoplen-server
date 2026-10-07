@@ -32,13 +32,14 @@ endpoints are still unmounted by the baseline listener; the injected sync router
 account-key, object-sync, and local notification boundaries but still delegates authentication,
 signature verification, membership, and policy decisions to the service. Notification events are
 encoded by `scoplen-api` and delivered only to authenticated device subscriptions through a
-process-local broadcast hub; PostgreSQL `LISTEN`/`NOTIFY` fan-out and event publication from the
+process-local broadcast hub. A parallel PostgreSQL migration set is checked against the SQLite
+logical schema in tests; PostgreSQL `LISTEN`/`NOTIFY` fan-out and event publication from the
 identity and vault services remain open. `scoplen-store` also exposes a backend-neutral object
 storage boundary for local filesystem and S3-compatible stores, with validated keys and streaming
 or multipart access. Database-backed roles initialize the configured object backend at startup and
 `/readyz` checks its reachability alongside the relational database. The durable job queue stores
 bounded opaque payloads, claims jobs with owner-checked leases, records retries, and requeues
 expired leases; the `worker` role runs this cleanup from a 30-second heartbeat. Policy filtering,
-retention job scheduling and membership-aware tombstone purge orchestration, PostgreSQL, parallel
-migration equivalence, application-level column encryption, audit, and other worker jobs remain
-roadmap work.
+retention job scheduling and membership-aware tombstone purge orchestration, the PostgreSQL query
+backend and runtime role selection, application-level column encryption, audit, and other worker
+jobs remain roadmap work.

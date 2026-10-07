@@ -44,3 +44,29 @@ jobs:
         working-directory: .
       - run: pnpm lint
       - run: pnpm typecheck
+
+  postgres-schema:
+    name: PostgreSQL migration schema
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: scoplen
+          POSTGRES_USER: scoplen
+          POSTGRES_PASSWORD: scoplen-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scoplen -d scoplen"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      SCOPLEN_TEST_DATABASE_URL: postgres://scoplen:scoplen-ci@127.0.0.1:5432/scoplen
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Show pinned toolchain
+        run: rustup show active-toolchain
+      - name: Compare PostgreSQL and SQLite schemas
+        run: cargo test -p scoplen-store --lib --features postgres-integration schema::tests::postgres_migrations_match_the_sqlite_logical_schema -- --exact

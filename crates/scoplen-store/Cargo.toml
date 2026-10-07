@@ -13,9 +13,12 @@ workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 object_store.workspace = true
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "migrate", "macros"] }
 thiserror.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
 uuid.workspace = true
+
+[features]
+postgres-integration = []

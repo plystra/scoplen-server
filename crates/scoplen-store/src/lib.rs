@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Relational storage boundary for the server. SQLite is the first durable backend.
+//! Relational storage boundary for the server.
 
 #![forbid(unsafe_code)]
 
 pub mod account_keys;
 pub mod jobs;
 pub mod object_storage;
+#[cfg(test)]
+mod schema;
 pub mod sync;
 
 pub use jobs::{Job, JobId, JobQueueError};
@@ -16,13 +18,15 @@ pub use object_storage::{
 use std::{path::Path, time::Duration};
 
 use sqlx::{
-    Pool, Sqlite, SqlitePool,
+    PgPool, Pool, Postgres, Sqlite, SqlitePool,
     migrate::Migrator,
+    postgres::PgPoolOptions,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use thiserror::Error;
 
 static SQLITE_MIGRATIONS: Migrator = sqlx::migrate!("./migrations/sqlite");
+static POSTGRES_MIGRATIONS: Migrator = sqlx::migrate!("./migrations/postgres");
 
 /// A database pool whose backend is selected by the deployment.
 ///
@@ -82,6 +86,46 @@ impl RelationalStore for SqliteStore {
     type Database = Sqlite;
 
     fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
+}
+
+/// PostgreSQL storage connection with the parallel forward migration set applied.
+///
+/// Server roles continue to select SQLite until their queries also support PostgreSQL.
+#[derive(Clone)]
+pub struct PostgresStore {
+    pool: PgPool,
+}
+
+impl PostgresStore {
+    /// Connect to PostgreSQL and apply the embedded forward migrations.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connection or migration fails. A failed migration prevents
+    /// callers from using the store.
+    pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
+        let pool = PgPoolOptions::new().max_connections(5).connect(database_url).await?;
+        POSTGRES_MIGRATIONS.run(&pool).await?;
+        Ok(Self { pool })
+    }
+
+    /// Check whether the database can execute a query for readiness checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the driver error when the database is unavailable.
+    pub async fn ping(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+}
+
+impl RelationalStore for PostgresStore {
+    type Database = Postgres;
+
+    fn pool(&self) -> &PgPool {
         &self.pool
     }
 }

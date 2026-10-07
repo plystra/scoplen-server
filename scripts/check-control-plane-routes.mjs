@@ -9,7 +9,11 @@ import { resolve } from "node:path";
 const [contractPath, manifestPath = "scripts/control-plane-routes.json"] = process.argv.slice(2);
 if (!contractPath) throw new Error("usage: node check-control-plane-routes.mjs <openapi-json-yaml> [manifest]");
 const contract = JSON.parse(await readFile(resolve(contractPath), "utf8"));
-const manifest = JSON.parse(await readFile(resolve(manifestPath), "utf8"));
+const serverRoot = new URL("../", import.meta.url);
+const manifestUrl = manifestPath === "scripts/control-plane-routes.json"
+  ? new URL("scripts/control-plane-routes.json", serverRoot)
+  : undefined;
+const manifest = JSON.parse(await readFile(manifestUrl ?? resolve(manifestPath), "utf8"));
 if (contract.openapi !== "3.1.0") throw new Error("the control-plane contract is not OpenAPI 3.1");
 if (!Array.isArray(manifest)) throw new Error("the route manifest must be an array");
 
@@ -24,7 +28,7 @@ for (const entry of manifest) {
   expected.add(`${method.toUpperCase()} ${entry.path}`);
 }
 
-const source = await readFile(resolve("crates/scoplen-server/src/runtime.rs"), "utf8");
+const source = await readFile(new URL("crates/scoplen-server/src/runtime.rs", serverRoot), "utf8");
 for (const match of source.matchAll(/\.route\(\s*["'](\/api\/v1\/[^"']+)["']\s*,\s*([^\n]+)/g)) {
   const [, path, expression] = match;
   const method = expression.match(/\b(get|post|patch|put|delete)\s*\(/)?.[1];
